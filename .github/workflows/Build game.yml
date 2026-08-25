@@ -64,15 +64,21 @@ jobs:
                 libsdl2-dev:armhf libsdl2-mixer-dev:armhf libsdl2-image-dev:armhf libsdl2-ttf-dev:armhf \
                 libgl1-mesa-dev:armhf libx11-dev:armhf libcurl4-openssl-dev:armhf zlib1g-dev:armhf
 
-              cd source/engine
+              cd engine
 
               echo "===== make makelibs (laedt/baut zlib, libpng, libjpeg, libvorbis selbst) ====="
               make makelibs FTE_TARGET=${FTE_TARGET}
 
               echo "===== Eigentlicher Build ====="
-              CC=arm-linux-gnueabihf-gcc CXX=arm-linux-gnueabihf-g++ \
-                make m-rel FTE_TARGET=${FTE_TARGET} FTE_CONFIG=${FTE_CONFIG} \
+              # WICHTIG: Bewusst KEIN manuelles CC/CXX=arm-linux-gnueabihf-gcc mehr
+              # gesetzt (das war eine eigene, nicht in der offiziellen Doku belegte
+              # Ergaenzung von mir und haette mit der internen Toolchain-Auswahl des
+              # Makefiles kollidieren koennen). FTE_TARGET=linux_armhf soll laut
+              # offizieller Kurzanleitung allein ausreichen.
+              set -x
+              make m-rel FTE_TARGET=${FTE_TARGET} FTE_CONFIG=${FTE_CONFIG} \
                 CPUOPTIMIZATIONS="${CPU_FLAGS}" -j"$(nproc)"
+              set +x
             '
 
       - name: Locate and package binary
@@ -82,18 +88,23 @@ jobs:
 
           # Der exakte Name/Pfad der fertigen Binary ist nicht offiziell dokumentiert -
           # daher robuste Suche statt fixem Pfad (wie schon beim REDRIVER2-Workflow).
-          BIN=$(find source/engine -maxdepth 4 -type f -executable \
+          BIN=$(find engine -maxdepth 4 -type f -executable \
                 \( -iname "*armhf*" -o -iname "fteqw*" -o -iname "*nzportable*" \) \
                 ! -iname "*.sh" | head -n1)
 
           if [ -z "${BIN}" ]; then
             echo "::error::Keine armhf-Binary gefunden. Vorhandene ausfuehrbare Dateien:"
-            find source/engine -maxdepth 4 -type f -executable
+            find engine -maxdepth 4 -type f -executable
             exit 1
           fi
 
           echo "Gefunden: ${BIN}"
-          file "${BIN}" || true
+          file "${BIN}"
+          if ! file "${BIN}" | grep -qi "ARM"; then
+            echo "::error::Binary ist offenbar NICHT fuer ARM gebaut (siehe 'file'-Ausgabe oben)."
+            echo "::error::Vermutlich wurde versehentlich der Host-Compiler statt des ARM-Cross-Compilers verwendet."
+            exit 1
+          fi
           cp "${BIN}" dist/nzportable/nzportable
 
           echo "Fertiger Inhalt:"
