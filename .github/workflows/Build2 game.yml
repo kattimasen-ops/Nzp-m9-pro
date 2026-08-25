@@ -1,4 +1,4 @@
-name: NZP (nzp-team/fteqw) PortMaster Build (linux_arm64 / RK3326)
+name: bau NZP AArch64 PortMaster Build (RK3326)
 
 on:
   push:
@@ -8,20 +8,20 @@ on:
 env:
   FTE_TARGET: linux_arm64
   FTE_CONFIG: nzportable
-  # 64-Bit RK3326 (Cortex-A35) Optimierungen
+  # Harte 64-Bit RK3326 (Cortex-A35) Optimierungen
   CPU_FLAGS: "-O3 -march=armv8-a+crc -mtune=cortex-a35 -ftree-vectorize -pipe"
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: Checkout nzp-team/fteqw (die tatsächliche Engine-Quelle)
+      - name: Checkout nzp-team/fteqw (Die offizielle Engine-Quelle)
         uses: actions/checkout@v4
         with:
           repository: nzp-team/fteqw
           submodules: recursive
 
-      - name: Cross-Build in Ubuntu 20.04 Container (glibc-Kompatibilität zum Gerät)
+      - name: Cross-Build im Ubuntu 20.04 Container (glibc-Kompatibilität)
         run: |
           set -euo pipefail
           docker run --rm -v "${{ github.workspace }}:/workspace" -w /workspace \
@@ -37,7 +37,7 @@ jobs:
           deb [arch=amd64] http://archive.ubuntu.com/ubuntu/ focal main restricted universe multiverse
           deb [arch=amd64] http://archive.ubuntu.com/ubuntu/ focal-updates main restricted universe multiverse
           deb [arch=amd64] http://archive.ubuntu.com/ubuntu/ focal-security main restricted universe multiverse
-
+          
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ focal main restricted universe multiverse
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ focal-updates main restricted universe multiverse
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ focal-security main restricted universe multiverse
@@ -49,7 +49,7 @@ jobs:
                 sleep 5
               done
 
-              echo "===== Installiere 64-Bit Toolchain und Abhängigkeiten ====="
+              echo "===== Installiere 64-Bit Toolchain und SDL2 Abhängigkeiten ====="
               apt-get install -y --no-install-recommends \
                 build-essential make git curl wget ca-certificates pkg-config perl \
                 gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
@@ -62,48 +62,44 @@ jobs:
 
               cd engine
 
-              echo "===== make makelibs (laedt/baut zlib, libpng, libjpeg, libvorbis selbst) ====="
+              echo "===== make makelibs (Integriert zlib, libpng, libjpeg, libvorbis) ====="
               make makelibs FTE_TARGET=${FTE_TARGET}
 
-              echo "===== Eigentlicher Build ====="
+              echo "===== Eigentlicher Build mit Cortex-A35 Optimierungen ====="
               set -x
               make m-rel FTE_TARGET=${FTE_TARGET} FTE_CONFIG=${FTE_CONFIG} \
                 CPUOPTIMIZATIONS="${CPU_FLAGS}" -j"$(nproc)"
               set +x
             '
 
-      - name: Locate and package binary
+      - name: Finde und benenne das fertige Binary um
         run: |
           set -euo pipefail
           mkdir -p dist/nzportable
 
-          # Sucht nach arm64/aarch64 im Namen
+          # Sucht verlässlich nach der generierten ARM64 Datei
           BIN=$(find engine -maxdepth 4 -type f -executable \
                 \( -iname "*arm64*" -o -iname "*aarch64*" -o -iname "fteqw*" -o -iname "*nzportable*" \) \
                 ! -iname "*.sh" | head -n1)
 
           if [ -z "${BIN}" ]; then
-            echo "::error::Keine arm64-Binary gefunden. Vorhandene ausfuehrbare Dateien:"
-            find engine -maxdepth 4 -type f -executable
+            echo "::error::Keine arm64-Binary gefunden!"
             exit 1
           fi
 
           echo "Gefunden: ${BIN}"
           file "${BIN}"
           if ! file "${BIN}" | grep -qi "ARM aarch64"; then
-            echo "::error::Binary ist offenbar NICHT fuer AArch64 gebaut (siehe 'file'-Ausgabe oben)."
+            echo "::error::Binary ist nicht für AArch64 gebaut!"
             exit 1
           fi
           
-          # Umbenennen für das PortMaster-Startskript des M9 Pro
+          # Umbenennung für direkte PortMaster-Kompatibilität auf dem M9 Pro
           cp "${BIN}" dist/nzportable/nzp-aarch64-sdl
 
-          echo "Fertiger Inhalt:"
-          ls -la dist/nzportable/
-
-      - name: Upload PortMaster Artifact
+      - name: Upload als PortMaster Artefakt
         uses: actions/upload-artifact@v4
         with:
-          name: NZP-PortMaster-aarch64
+          name: nzp-m9pro-aarch64-optimized
           path: dist/nzportable/
           if-no-files-found: error
