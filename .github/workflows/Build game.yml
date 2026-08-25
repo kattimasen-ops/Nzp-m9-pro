@@ -59,10 +59,14 @@ jobs:
               # Build "missing package X" meldet, hier ergaenzen. Die verlaesslichste
               # Referenz waere nzp-team/tools/fteqw-docker.
               apt-get install -y --no-install-recommends \
-                build-essential make git curl ca-certificates pkg-config perl \
+                build-essential make git curl wget ca-certificates pkg-config perl \
                 gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf \
                 libsdl2-dev:armhf libsdl2-mixer-dev:armhf libsdl2-image-dev:armhf libsdl2-ttf-dev:armhf \
                 libgl1-mesa-dev:armhf libx11-dev:armhf libcurl4-openssl-dev:armhf zlib1g-dev:armhf
+
+              echo "===== Git safe.directory Ausnahme (Ownership-Mismatch Runner vs. Container-root) ====="
+              git config --global --add safe.directory /workspace
+              git config --global --add safe.directory "*"
 
               cd engine
 
