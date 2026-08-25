@@ -1,0 +1,72 @@
+name: Build Optimized NZP for ArkOS RK3326
+
+on:
+  workflow_dispatch: # Erlaubt den manuellen Start per Knopfdruck in GitHub
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Repository auschecken (inkl. Submodules für FTEQW Engine)
+        uses: actions/checkout@v4
+        with:
+          repository: nzp-team/nzportable
+          submodules: recursive
+
+      - name: Multi-Architektur (armhf) für Cross-Compiling aktivieren
+        run: |
+          sudo dpkg --add-architecture armhf
+          sudo apt-get update
+
+      - name: ARMHF Cross-Compiler und SDL2-Entwicklungsbibliotheken installieren
+        run: |
+          sudo apt-get install -y \
+            gcc-arm-linux-gnueabihf \
+            g++-arm-linux-gnueabihf \
+            make \
+            cmake \
+            libsdl2-dev:armhf \
+            libsdl2-mixer-dev:armhf \
+            libsdl2-image-dev:armhf \
+            libsdl2-net-dev:armhf \
+            zlib1g-dev:armhf
+
+      - name: CMake Konfiguration mit RK3326-Optimierungen
+        run: |
+          mkdir build && cd build
+          
+          # Compiler-Variablen auf den armhf-Cross-Compiler lenken
+          export CC=arm-linux-gnueabihf-gcc
+          export CXX=arm-linux-gnueabihf-g++
+          
+          # High-Performance Flags für Cortex-A35 / ARMv7-A mit NEON Hardware-FPU
+          export CFLAGS="-O3 -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard -ftree-vectorize -pipe"
+          export CXXFLAGS="${CFLAGS}"
+          
+          cmake .. \
+            -DCMAKE_SYSTEM_NAME=Linux \
+            -DCMAKE_SYSTEM_PROCESSOR=arm \
+            -DCMAKE_C_COMPILER=$CC \
+            -DCMAKE_CXX_COMPILER=$CXX \
+            -DCLIENT=ON \
+            -DSERVER=OFF
+
+      - name: Kompilierung starten (Multi-Core Build)
+        run: |
+          cd build
+          make -j$(nproc)
+
+      - name: Paket für PortMaster strukturieren
+        run: |
+          mkdir -p output_port
+          # Sucht nach der kompilierten Executable und kopiert sie ins Ausgabeverzeichnis
+          find build/ -maxdepth 2 -type f -executable -exec cp {} output_port/nzportable \;
+
+      - name: Kompiliertes Binary als Artefakt hochladen
+        uses: actions/upload-artifact@v4
+        with:
+          name: nzp-arkos-armhf-optimized
+          path: output_port/
