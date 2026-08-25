@@ -1,4 +1,4 @@
-name: NZP (nzp-team/fteqw) PortMaster Build (linux_armhf / RK3326)
+name: NZP (nzp-team/fteqw) PortMaster Build (linux_arm64 / RK3326)
 
 on:
   push:
@@ -6,14 +6,10 @@ on:
   workflow_dispatch:
 
 env:
-  FTE_TARGET: linux_armhf
+  FTE_TARGET: linux_arm64
   FTE_CONFIG: nzportable
-  # ACHTUNG: CPUOPTIMIZATIONS wurde nur im Wrapper-Skript des Upstream-FTE-Projekts
-  # gesehen (fte-team/fteqw/build_wip.sh), NICHT im Makefile selbst verifiziert.
-  # Im Build-Log unten wird die tatsächliche Compiler-Kommandozeile ausgegeben -
-  # prueft dort, ob -march=armv7-a etc. wirklich ankommt. Falls nicht, muesst ihr
-  # ins engine/Makefile schauen, wie CFLAGS dort tatsaechlich injiziert werden.
-  CPU_FLAGS: "-march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard -O3"
+  # 64-Bit RK3326 (Cortex-A35) Optimierungen
+  CPU_FLAGS: "-O3 -march=armv8-a+crc -mtune=cortex-a35 -ftree-vectorize -pipe"
 
 jobs:
   build:
@@ -34,17 +30,17 @@ jobs:
               set -euo pipefail
               export DEBIAN_FRONTEND=noninteractive
 
-              echo "===== Konfiguriere ARMhf Quellen (Ubuntu 20.04 / focal) ====="
-              dpkg --add-architecture armhf
+              echo "===== Konfiguriere ARM64 Quellen (Ubuntu 20.04 / focal) ====="
+              dpkg --add-architecture arm64
               cp /etc/apt/sources.list /etc/apt/sources.list.bak
               cat > /etc/apt/sources.list << EOF
           deb [arch=amd64] http://archive.ubuntu.com/ubuntu/ focal main restricted universe multiverse
           deb [arch=amd64] http://archive.ubuntu.com/ubuntu/ focal-updates main restricted universe multiverse
           deb [arch=amd64] http://archive.ubuntu.com/ubuntu/ focal-security main restricted universe multiverse
 
-          deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports/ focal main restricted universe multiverse
-          deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports/ focal-updates main restricted universe multiverse
-          deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports/ focal-security main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ focal main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ focal-updates main restricted universe multiverse
+          deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ focal-security main restricted universe multiverse
           EOF
 
               for i in 1 2 3; do
@@ -53,18 +49,14 @@ jobs:
                 sleep 5
               done
 
-              # HINWEIS: zlib/libpng/libjpeg/libvorbis baut "make makelibs" selbst -
-              # daher hier NICHT per apt installiert. Die restliche Liste ist eine
-              # plausible Basis (SDL2 fuers Fenster/Input, GL/X11, curl) - falls der
-              # Build "missing package X" meldet, hier ergaenzen. Die verlaesslichste
-              # Referenz waere nzp-team/tools/fteqw-docker.
+              echo "===== Installiere 64-Bit Toolchain und Abhängigkeiten ====="
               apt-get install -y --no-install-recommends \
                 build-essential make git curl wget ca-certificates pkg-config perl \
-                gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf \
-                libsdl2-dev:armhf libsdl2-mixer-dev:armhf libsdl2-image-dev:armhf libsdl2-ttf-dev:armhf \
-                libgl1-mesa-dev:armhf libx11-dev:armhf libcurl4-openssl-dev:armhf zlib1g-dev:armhf
+                gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+                libsdl2-dev:arm64 libsdl2-mixer-dev:arm64 libsdl2-image-dev:arm64 libsdl2-ttf-dev:arm64 \
+                libgl1-mesa-dev:arm64 libx11-dev:arm64 libcurl4-openssl-dev:arm64 zlib1g-dev:arm64
 
-              echo "===== Git safe.directory Ausnahme (Ownership-Mismatch Runner vs. Container-root) ====="
+              echo "===== Git safe.directory Ausnahme ====="
               git config --global --add safe.directory /workspace
               git config --global --add safe.directory "*"
 
@@ -74,11 +66,6 @@ jobs:
               make makelibs FTE_TARGET=${FTE_TARGET}
 
               echo "===== Eigentlicher Build ====="
-              # WICHTIG: Bewusst KEIN manuelles CC/CXX=arm-linux-gnueabihf-gcc mehr
-              # gesetzt (das war eine eigene, nicht in der offiziellen Doku belegte
-              # Ergaenzung von mir und haette mit der internen Toolchain-Auswahl des
-              # Makefiles kollidieren koennen). FTE_TARGET=linux_armhf soll laut
-              # offizieller Kurzanleitung allein ausreichen.
               set -x
               make m-rel FTE_TARGET=${FTE_TARGET} FTE_CONFIG=${FTE_CONFIG} \
                 CPUOPTIMIZATIONS="${CPU_FLAGS}" -j"$(nproc)"
@@ -90,26 +77,26 @@ jobs:
           set -euo pipefail
           mkdir -p dist/nzportable
 
-          # Der exakte Name/Pfad der fertigen Binary ist nicht offiziell dokumentiert -
-          # daher robuste Suche statt fixem Pfad (wie schon beim REDRIVER2-Workflow).
+          # Sucht nach arm64/aarch64 im Namen
           BIN=$(find engine -maxdepth 4 -type f -executable \
-                \( -iname "*armhf*" -o -iname "fteqw*" -o -iname "*nzportable*" \) \
+                \( -iname "*arm64*" -o -iname "*aarch64*" -o -iname "fteqw*" -o -iname "*nzportable*" \) \
                 ! -iname "*.sh" | head -n1)
 
           if [ -z "${BIN}" ]; then
-            echo "::error::Keine armhf-Binary gefunden. Vorhandene ausfuehrbare Dateien:"
+            echo "::error::Keine arm64-Binary gefunden. Vorhandene ausfuehrbare Dateien:"
             find engine -maxdepth 4 -type f -executable
             exit 1
           fi
 
           echo "Gefunden: ${BIN}"
           file "${BIN}"
-          if ! file "${BIN}" | grep -qi "ARM"; then
-            echo "::error::Binary ist offenbar NICHT fuer ARM gebaut (siehe 'file'-Ausgabe oben)."
-            echo "::error::Vermutlich wurde versehentlich der Host-Compiler statt des ARM-Cross-Compilers verwendet."
+          if ! file "${BIN}" | grep -qi "ARM aarch64"; then
+            echo "::error::Binary ist offenbar NICHT fuer AArch64 gebaut (siehe 'file'-Ausgabe oben)."
             exit 1
           fi
-          cp "${BIN}" dist/nzportable/nzportable
+          
+          # Umbenennen für das PortMaster-Startskript des M9 Pro
+          cp "${BIN}" dist/nzportable/nzp-aarch64-sdl
 
           echo "Fertiger Inhalt:"
           ls -la dist/nzportable/
@@ -117,6 +104,6 @@ jobs:
       - name: Upload PortMaster Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: NZP-PortMaster-armhf
+          name: NZP-PortMaster-aarch64
           path: dist/nzportable/
           if-no-files-found: error
