@@ -1,4 +1,4 @@
-name: bau NZP AArch64 PortMaster Build (RK3326)
+name: NZP AArch64 PortMaster Build (RK3326)
 
 on:
   push:
@@ -8,13 +8,17 @@ on:
 env:
   FTE_TARGET: linux_arm64
   FTE_CONFIG: nzportable
+  # UNVERIFIZIERT: konnte nicht gegen das echte engine/Makefile geprueft werden
+  # (GitHub blockiert Datei-Ansicht fuer automatisierten Zugriff). Im Log unten
+  # (set -x) seht ihr die tatsaechliche Compiler-Kommandozeile - prueft dort,
+  # ob diese Flags wirklich ankommen.
   CPU_FLAGS: "-O3 -march=armv8-a+crc -mtune=cortex-a35 -ftree-vectorize -pipe"
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: Checkout nzp-team/fteqw
+      - name: Checkout nzp-team/fteqw (die tatsächliche Engine-Quelle)
         uses: actions/checkout@v4
         with:
           repository: nzp-team/fteqw
@@ -29,13 +33,14 @@ jobs:
               set -euo pipefail
               export DEBIAN_FRONTEND=noninteractive
 
+              echo "===== Konfiguriere ARM64 Quellen (Ubuntu 20.04 / focal) ====="
               dpkg --add-architecture arm64
               cp /etc/apt/sources.list /etc/apt/sources.list.bak
               cat > /etc/apt/sources.list << EOF
           deb [arch=amd64] http://archive.ubuntu.com/ubuntu/ focal main restricted universe multiverse
           deb [arch=amd64] http://archive.ubuntu.com/ubuntu/ focal-updates main restricted universe multiverse
           deb [arch=amd64] http://archive.ubuntu.com/ubuntu/ focal-security main restricted universe multiverse
-          
+
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ focal main restricted universe multiverse
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ focal-updates main restricted universe multiverse
           deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports/ focal-security main restricted universe multiverse
@@ -43,28 +48,49 @@ jobs:
 
               for i in 1 2 3; do
                 apt-get update && break
+                echo "apt-get update fehlgeschlagen, Versuch $i/3 ..."
                 sleep 5
               done
 
+              # ERWEITERTE Liste ggue. der letzten Version: X11, Wayland, Vulkan
+              # und ALSA-Dev-Header ergaenzt, damit die Makefile-eigene
+              # Feature-Erkennung (Header vorhanden -> Backend einkompilieren)
+              # moeglichst VIELE Video-/Audio-Backends einbauen kann - passend
+              # zu eurem Wunsch "jeder Video-Treiber soll mit kompiliert werden".
+              # zlib/libpng/libjpeg/libvorbis baut "make makelibs" selbst.
               apt-get install -y --no-install-recommends \
                 build-essential make git curl wget ca-certificates pkg-config perl \
                 gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
                 libsdl2-dev:arm64 libsdl2-mixer-dev:arm64 libsdl2-image-dev:arm64 libsdl2-ttf-dev:arm64 \
-                libgles2-mesa-dev:arm64 libegl1-mesa-dev:arm64 libcurl4-openssl-dev:arm64 zlib1g-dev:arm64
+                libgles2-mesa-dev:arm64 libegl1-mesa-dev:arm64 libgl1-mesa-dev:arm64 \
+                libx11-dev:arm64 libxext-dev:arm64 libxrandr-dev:arm64 \
+                libwayland-dev:arm64 libwayland-egl-backend-dev:arm64 libxkbcommon-dev:arm64 \
+                libvulkan-dev:arm64 libasound2-dev:arm64 \
+                libcurl4-openssl-dev:arm64 zlib1g-dev:arm64
 
+              echo "===== Git safe.directory Ausnahme (Ownership-Mismatch Runner vs. Container-root) ====="
               git config --global --add safe.directory /workspace
               git config --global --add safe.directory "*"
 
               cd engine
+
+              echo "===== make makelibs (laedt/baut zlib, libpng, libjpeg, libvorbis selbst) ====="
               make makelibs FTE_TARGET=${FTE_TARGET}
 
+              echo "===== Eigentlicher Build ====="
+              # WICHTIG: NO_X11=1 / NO_WAYLAND=1 / USE_SDL=2 aus eurer letzten
+              # Version bewusst ENTFERNT - widersprachen eurem "alles soll rein"
+              # Wunsch, und ich konnte sie nicht gegen das echte Makefile
+              # verifizieren (GitHub/Spiegel blockieren automatisierten Zugriff
+              # auf die Datei). Auch kein manuelles CC/CXX (siehe vorherige
+              # Iteration - das kollidierte mit der internen Toolchain-Wahl).
               set -x
               make m-rel FTE_TARGET=${FTE_TARGET} FTE_CONFIG=${FTE_CONFIG} \
-                CPUOPTIMIZATIONS="${CPU_FLAGS}" NO_X11=1 NO_WAYLAND=1 USE_SDL=2 -j"$(nproc)"
+                CPUOPTIMIZATIONS="${CPU_FLAGS}" -j"$(nproc)"
               set +x
             '
 
-      - name: Finde und benenne das fertige Binary um
+      - name: Finde, prüfe und benenne das fertige Binary um
         run: |
           set -euo pipefail
           mkdir -p dist/nzportable
@@ -74,12 +100,22 @@ jobs:
                 ! -iname "*.sh" | head -n1)
 
           if [ -z "${BIN}" ]; then
-            echo "::error::Keine arm64-Binary gefunden!"
+            echo "::error::Keine arm64-Binary gefunden. Vorhandene ausfuehrbare Dateien:"
+            find engine -maxdepth 4 -type f -executable
             exit 1
           fi
 
+          echo "Gefunden: ${BIN}"
           file "${BIN}"
+          if ! file "${BIN}" | grep -qi "aarch64\|ARM aarch64\|64-bit.*ARM"; then
+            echo "::error::Binary ist offenbar NICHT fuer AArch64 gebaut (siehe 'file'-Ausgabe oben)."
+            exit 1
+          fi
+
           cp "${BIN}" dist/nzportable/nzp-aarch64-sdl
+
+          echo "Fertiger Inhalt:"
+          ls -la dist/nzportable/
 
       - name: Upload als PortMaster Artefakt
         uses: actions/upload-artifact@v4
