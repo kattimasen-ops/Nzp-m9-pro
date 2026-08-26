@@ -68,7 +68,7 @@ jobs:
               echo "===== Eigentlicher Build mit Cortex-A35 Optimierungen ====="
               set -x
               make m-rel FTE_TARGET=${FTE_TARGET} FTE_CONFIG=${FTE_CONFIG} \
-                CPUOPTIMIZATIONS="${CPU_FLAGS}" -j"$(nproc)"
+                CPUOPTIMIZATIONS="${CPU_FLAGS}" NO_X11=1 USE_SDL=2 -j"$(nproc)"
               set +x
             '
 
