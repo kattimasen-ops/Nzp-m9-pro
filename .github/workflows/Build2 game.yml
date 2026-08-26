@@ -46,7 +46,6 @@ jobs:
                 sleep 5
               done
 
-              # WICHTIG: libx11-dev wurde entfernt, libgles2-mesa-dev hinzugefügt
               apt-get install -y --no-install-recommends \
                 build-essential make git curl wget ca-certificates pkg-config perl \
                 gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
@@ -59,10 +58,9 @@ jobs:
               cd engine
               make makelibs FTE_TARGET=${FTE_TARGET}
 
-              # WICHTIG: sdl-rel statt m-rel erzwingt einen reinen SDL2 Client
               set -x
-              make sdl-rel FTE_TARGET=${FTE_TARGET} FTE_CONFIG=${FTE_CONFIG} \
-                CPUOPTIMIZATIONS="${CPU_FLAGS}" NO_X11=1 USE_SDL=2 -j"$(nproc)"
+              make m-rel FTE_TARGET=${FTE_TARGET} FTE_CONFIG=${FTE_CONFIG} \
+                CPUOPTIMIZATIONS="${CPU_FLAGS}" NO_X11=1 NO_WAYLAND=1 USE_SDL=2 -j"$(nproc)"
               set +x
             '
 
