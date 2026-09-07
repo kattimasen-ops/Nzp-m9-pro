@@ -1,4 +1,4 @@
-name: Build NZP FTE Engine PortMaster (RK3326)
+name: Build NZP Complete PortMaster Package (RK3326 / ArkOS)
 
 on:
   push:
@@ -6,19 +6,19 @@ on:
   workflow_dispatch:
 
 jobs:
-  build-portmaster:
+  build-portmaster-package:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout nzp-team/fteqw
+      - name: Checkout Source Code with Submodules
         uses: actions/checkout@v4
         with:
-          repository: nzp-team/fteqw
           submodules: recursive
+          fetch-depth: 0
 
       - name: Set up QEMU (ARM64 Emulation)
         uses: docker/setup-qemu-action@v3
 
-      - name: Native Build in Ubuntu 20.04 ARM64 Container
+      - name: Compile FTE Engine & QuakeC Code in ARM64 Container
         run: |
           docker run --rm --platform linux/arm64 -v "${{ github.workspace }}:/workspace" -w /workspace \
             arm64v8/ubuntu:20.04 bash -c '
@@ -32,12 +32,9 @@ jobs:
               git config --global --add safe.directory /workspace
               git config --global --add safe.directory "*"
 
+              # 1. Compile FTE Engine Binary
               cd engine
-
-              # Build required static libraries natively
               make makelibs FTE_TARGET=linux_arm64
-
-              # Build release executable forcing SDL2/GLES and disabling X11/Wayland/Vulkan
               make m-rel \
                 FTE_TARGET=linux_arm64 \
                 FTE_CONFIG=nzportable \
@@ -47,33 +44,42 @@ jobs:
                 NO_VULKAN=1 \
                 CPUOPTIMIZATIONS="-O2 -march=armv8-a -mtune=cortex-a35 -pipe" \
                 -j"$(nproc)"
+              cd ..
+
+              # 2. Compile QuakeC Code (progs.dat / menu.dat) if FTEqcc exists
+              if [ -d "code" ] || [ -d "src" ]; then
+                echo "Building updated QuakeC game bytecode..."
+                make progs || make qc || true
+              fi
             '
 
-      - name: Package Executable for PortMaster
+      - name: Stage Complete PortMaster Artifact
         run: |
           set -euo pipefail
           mkdir -p dist/nzp
 
-          # Find the compiled binary
+          # Copy Engine Binary
           BIN=$(find engine -maxdepth 4 -type f -executable \
                 \( -iname "*arm64*" -o -iname "*aarch64*" -o -iname "fteqw*" -o -iname "*nzportable*" \) \
                 ! -iname "*.sh" | head -n1)
 
           if [ -z "${BIN}" ]; then
-            echo "Error: No ARM64 binary found after build!"
-            exit 1
+            echo "Error: Engine binary not found!" && exit 1
           fi
 
-          # Rename directly to expected PortMaster filename
           cp "${BIN}" dist/nzp/nzp.aarch64
           chmod +x dist/nzp/nzp.aarch64
 
-          echo "Binary details:"
-          file dist/nzp/nzp.aarch64
+          # Copy Compiled QuakeC Bytecode Data Files (if present)
+          find . -maxdepth 3 \( -name "progs.dat" -o -name "menu.dat" -o -name "csprogs.dat" \) \
+            -exec cp {} dist/nzp/ \;
 
-      - name: Upload PortMaster Binary Artifact
+          echo "Final Package Contents:"
+          ls -la dist/nzp/
+
+      - name: Upload PortMaster Ready Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nzp-rk3326-portmaster
-          path: dist/nzp/nzp.aarch64
+          name: nzp-m9pro-portmaster-complete
+          path: dist/nzp/
           if-no-files-found: error
