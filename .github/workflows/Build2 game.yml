@@ -32,22 +32,17 @@ jobs:
               git config --global --add safe.directory /workspace
               git config --global --add safe.directory "*"
 
-              # Dynamically locate the engine build directory
-              if [ -f "engine/Makefile" ]; then
-                echo "Found Makefile in engine/ directory."
-                cd engine
-              elif [ -f "Makefile" ]; then
-                echo "Found Makefile in root directory."
-              elif [ -f "vril-engine/Makefile" ]; then
-                echo "Found Makefile in vril-engine/ directory."
-                cd vril-engine
+              # Case-insensitive Makefile discovery to avoid empty variables
+              MAKEFILE_PATH=$(find . -maxdepth 4 \( -iname "makefile" -o -iname "GNUmakefile" \) | head -n 1)
+
+              if [ -n "${MAKEFILE_PATH}" ]; then
+                BUILD_DIR=$(dirname "${MAKEFILE_PATH}")
+                echo "Located Makefile at: ${MAKEFILE_PATH} (Directory: ${BUILD_DIR})"
+                cd "${BUILD_DIR}"
               else
-                ENGINE_DIR=$(dirname $(find . -maxdepth 3 -name "Makefile" | head -n 1))
-                if [ -n "$ENGINE_DIR" ]; then
-                  cd "$ENGINE_DIR"
-                else
-                  echo "Error: Could not locate Makefile!" && exit 1
-                fi
+                echo "Error: Could not locate any Makefile in the repository!"
+                ls -la
+                exit 1
               fi
 
               # 1. Compile FTE Engine Binary
@@ -68,13 +63,13 @@ jobs:
           set -euo pipefail
           mkdir -p dist/nzp
 
-          # Locate and copy compiled binary
+          # Locate and copy compiled binary safely
           BIN=$(find . -maxdepth 5 -type f -executable \
                 \( -iname "*arm64*" -o -iname "*aarch64*" -o -iname "fteqw*" -o -iname "*nzportable*" \) \
-                ! -iname "*.sh" | head -n1)
+                ! -iname "*.sh" | head -n 1)
 
           if [ -z "${BIN}" ]; then
-            echo "Error: Engine binary not found!" && exit 1
+            echo "Error: Engine binary not found after compilation!" && exit 1
           fi
 
           cp "${BIN}" dist/nzp/nzp.aarch64
@@ -84,7 +79,7 @@ jobs:
           find . -maxdepth 4 \( -name "progs.dat" -o -name "menu.dat" -o -name "csprogs.dat" \) \
             -exec cp {} dist/nzp/ \;
 
-          echo "Final Package Contents:"
+          echo "Final Artifact Contents:"
           ls -la dist/nzp/
 
       - name: Upload PortMaster Ready Artifact
