@@ -1,4 +1,4 @@
-name: Build NZP Complete PortMaster Package (RK3326 / ArkOS)
+name: Build NZP PortMaster Engine (RK3326 / ArkOS)
 
 on:
   push:
@@ -9,16 +9,17 @@ jobs:
   build-portmaster-package:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout Source Code with Submodules
+      - name: Checkout nzp-team/fteqw Engine Repository
         uses: actions/checkout@v4
         with:
+          repository: nzp-team/fteqw
           submodules: recursive
           fetch-depth: 0
 
       - name: Set up QEMU (ARM64 Emulation)
         uses: docker/setup-qemu-action@v3
 
-      - name: Compile FTE Engine & QuakeC Code in ARM64 Container
+      - name: Compile FTE Engine in ARM64 Container
         run: |
           docker run --rm --platform linux/arm64 -v "${{ github.workspace }}:/workspace" -w /workspace \
             arm64v8/ubuntu:20.04 bash -c '
@@ -32,20 +33,26 @@ jobs:
               git config --global --add safe.directory /workspace
               git config --global --add safe.directory "*"
 
-              # Case-insensitive Makefile discovery to avoid empty variables
-              MAKEFILE_PATH=$(find . -maxdepth 4 \( -iname "makefile" -o -iname "GNUmakefile" \) | head -n 1)
-
-              if [ -n "${MAKEFILE_PATH}" ]; then
-                BUILD_DIR=$(dirname "${MAKEFILE_PATH}")
-                echo "Located Makefile at: ${MAKEFILE_PATH} (Directory: ${BUILD_DIR})"
-                cd "${BUILD_DIR}"
+              # Locate Makefile inside fteqw source directory
+              if [ -f "engine/Makefile" ]; then
+                echo "Located Makefile in engine/ directory."
+                cd engine
+              elif [ -f "Makefile" ]; then
+                echo "Located Makefile in root directory."
               else
-                echo "Error: Could not locate any Makefile in the repository!"
-                ls -la
-                exit 1
+                MAKEFILE_PATH=$(find . -maxdepth 4 \( -iname "makefile" -o -iname "GNUmakefile" \) | head -n 1)
+                if [ -n "${MAKEFILE_PATH}" ]; then
+                  BUILD_DIR=$(dirname "${MAKEFILE_PATH}")
+                  echo "Located Makefile at: ${MAKEFILE_PATH} (Directory: ${BUILD_DIR})"
+                  cd "${BUILD_DIR}"
+                else
+                  echo "Error: Could not locate Makefile!"
+                  ls -la
+                  exit 1
+                fi
               fi
 
-              # 1. Compile FTE Engine Binary
+              # Compile FTE Engine Binary for PortMaster
               make makelibs FTE_TARGET=linux_arm64 || true
               make m-rel \
                 FTE_TARGET=linux_arm64 \
@@ -74,10 +81,6 @@ jobs:
 
           cp "${BIN}" dist/nzp/nzp.aarch64
           chmod +x dist/nzp/nzp.aarch64
-
-          # Copy compiled QuakeC bytecode files if present
-          find . -maxdepth 4 \( -name "progs.dat" -o -name "menu.dat" -o -name "csprogs.dat" \) \
-            -exec cp {} dist/nzp/ \;
 
           echo "Final Artifact Contents:"
           ls -la dist/nzp/
