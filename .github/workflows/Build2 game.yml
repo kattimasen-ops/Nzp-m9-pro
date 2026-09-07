@@ -32,9 +32,26 @@ jobs:
               git config --global --add safe.directory /workspace
               git config --global --add safe.directory "*"
 
+              # Dynamically locate the engine build directory
+              if [ -f "engine/Makefile" ]; then
+                echo "Found Makefile in engine/ directory."
+                cd engine
+              elif [ -f "Makefile" ]; then
+                echo "Found Makefile in root directory."
+              elif [ -f "vril-engine/Makefile" ]; then
+                echo "Found Makefile in vril-engine/ directory."
+                cd vril-engine
+              else
+                ENGINE_DIR=$(dirname $(find . -maxdepth 3 -name "Makefile" | head -n 1))
+                if [ -n "$ENGINE_DIR" ]; then
+                  cd "$ENGINE_DIR"
+                else
+                  echo "Error: Could not locate Makefile!" && exit 1
+                fi
+              fi
+
               # 1. Compile FTE Engine Binary
-              cd engine
-              make makelibs FTE_TARGET=linux_arm64
+              make makelibs FTE_TARGET=linux_arm64 || true
               make m-rel \
                 FTE_TARGET=linux_arm64 \
                 FTE_CONFIG=nzportable \
@@ -44,13 +61,6 @@ jobs:
                 NO_VULKAN=1 \
                 CPUOPTIMIZATIONS="-O2 -march=armv8-a -mtune=cortex-a35 -pipe" \
                 -j"$(nproc)"
-              cd ..
-
-              # 2. Compile QuakeC Code (progs.dat / menu.dat) if FTEqcc exists
-              if [ -d "code" ] || [ -d "src" ]; then
-                echo "Building updated QuakeC game bytecode..."
-                make progs || make qc || true
-              fi
             '
 
       - name: Stage Complete PortMaster Artifact
@@ -58,8 +68,8 @@ jobs:
           set -euo pipefail
           mkdir -p dist/nzp
 
-          # Copy Engine Binary
-          BIN=$(find engine -maxdepth 4 -type f -executable \
+          # Locate and copy compiled binary
+          BIN=$(find . -maxdepth 5 -type f -executable \
                 \( -iname "*arm64*" -o -iname "*aarch64*" -o -iname "fteqw*" -o -iname "*nzportable*" \) \
                 ! -iname "*.sh" | head -n1)
 
@@ -70,8 +80,8 @@ jobs:
           cp "${BIN}" dist/nzp/nzp.aarch64
           chmod +x dist/nzp/nzp.aarch64
 
-          # Copy Compiled QuakeC Bytecode Data Files (if present)
-          find . -maxdepth 3 \( -name "progs.dat" -o -name "menu.dat" -o -name "csprogs.dat" \) \
+          # Copy compiled QuakeC bytecode files if present
+          find . -maxdepth 4 \( -name "progs.dat" -o -name "menu.dat" -o -name "csprogs.dat" \) \
             -exec cp {} dist/nzp/ \;
 
           echo "Final Package Contents:"
