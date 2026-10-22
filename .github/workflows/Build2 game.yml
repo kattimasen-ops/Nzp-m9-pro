@@ -13,6 +13,8 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: nzp-team/fteqw
+          # Sorgt dafür, dass immer der neueste Stand der Engine geladen wird
+          ref: master
           submodules: recursive
           fetch-depth: 0
 
@@ -52,6 +54,16 @@ jobs:
                 fi
               fi
 
+              # ── Optimierte Compiler-Flags für Cortex-A35 (AArch64) ──────
+              # -O3: Aggressive Optimierung (Inline, Vektorisierung)
+              # -mcpu=cortex-a35: A35-spezifische Instruktionen (inkl. NEON)
+              # -mtune=cortex-a35: Optimiert den Instruction-Scheduler für den A35
+              # -funsafe-math-optimizations: Schnellere Gleitkomma-Mathematik
+              # -fomit-frame-pointer: Gibt das RBP-Register für Berechnungen frei
+              # -funroll-loops: Entrollt Schleifen, was auf In-Order CPUs wie dem A35 hilft
+              # (Hinweis: NEON ist auf AArch64 standardmäßig immer an.)
+              OPT_FLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 -funsafe-math-optimizations -fno-math-errno -fno-trapping-math -fomit-frame-pointer -funroll-loops -pipe"
+
               # Compile FTE Engine Binary for PortMaster
               make makelibs FTE_TARGET=linux_arm64 || true
               make m-rel \
@@ -61,7 +73,7 @@ jobs:
                 NO_X11=1 \
                 NO_WAYLAND=1 \
                 NO_VULKAN=1 \
-                CPUOPTIMIZATIONS="-O2 -march=armv8-a -mtune=cortex-a35 -pipe" \
+                CPUOPTIMIZATIONS="${OPT_FLAGS}" \
                 -j"$(nproc)"
             '
 
