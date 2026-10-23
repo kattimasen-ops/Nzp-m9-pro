@@ -13,82 +13,77 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: nzp-team/fteqw
-          # Sorgt dafür, dass immer der neueste Stand der Engine geladen wird
           ref: master
           submodules: recursive
           fetch-depth: 0
 
-      - name: Set up QEMU (ARM64 Emulation)
-        uses: docker/setup-qemu-action@v3
-
-      - name: Compile FTE Engine in ARM64 Container
+      - name: Install Cross-Compiler Toolchain
         run: |
-          docker run --rm --platform linux/arm64 -v "${{ github.workspace }}:/workspace" -w /workspace \
-            arm64v8/ubuntu:20.04 bash -c '
-              set -euo pipefail
-              export DEBIAN_FRONTEND=noninteractive
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            make pkg-config
 
-              apt-get update && apt-get install -y --no-install-recommends \
-                build-essential make git curl wget ca-certificates pkg-config perl \
-                libsdl2-dev libgles2-mesa-dev libegl1-mesa-dev libasound2-dev zlib1g-dev
+      - name: Compile FTE Engine (Cross-Compile for aarch64)
+        run: |
+          set -euo pipefail
 
-              git config --global --add safe.directory /workspace
-              git config --global --add safe.directory "*"
+          # Locate Makefile inside fteqw source directory
+          if [ -f "engine/Makefile" ]; then
+            cd engine
+          else
+            MAKEFILE_PATH=$(find . -maxdepth 4 \( -iname "makefile" -o -iname "GNUmakefile" \) | head -n 1)
+            if [ -z "${MAKEFILE_PATH}" ]; then
+              echo "Error: Could not locate Makefile!"
+              exit 1
+            fi
+            cd "$(dirname "${MAKEFILE_PATH}")"
+          fi
 
-              # Locate Makefile inside fteqw source directory
-              if [ -f "engine/Makefile" ]; then
-                echo "Located Makefile in engine/ directory."
-                cd engine
-              elif [ -f "Makefile" ]; then
-                echo "Located Makefile in root directory."
-              else
-                MAKEFILE_PATH=$(find . -maxdepth 4 \( -iname "makefile" -o -iname "GNUmakefile" \) | head -n 1)
-                if [ -n "${MAKEFILE_PATH}" ]; then
-                  BUILD_DIR=$(dirname "${MAKEFILE_PATH}")
-                  echo "Located Makefile at: ${MAKEFILE_PATH} (Directory: ${BUILD_DIR})"
-                  cd "${BUILD_DIR}"
-                else
-                  echo "Error: Could not locate Makefile!"
-                  ls -la
-                  exit 1
-                fi
-              fi
+          # ── Optimierte Compiler-Flags für Cortex-A35 (AArch64) ──────
+          # -O3: Aggressive Optimierung (beibehalten wie gewünscht)
+          # -mcpu=cortex-a35: A35-spezifische Instruktionen (inkl. NEON)
+          # -mtune=cortex-a35: Optimiert den Instruction-Scheduler für den A35
+          # -fno-strict-aliasing: Quake-Engine-Code verlässt sich auf Typ-Punning
+          # -fno-finite-math-only: Konservativer als -funsafe-math-optimizations
+          # -fomit-frame-pointer: Gibt das RBP-Register für Berechnungen frei
+          # -funroll-loops: Entrollt Schleifen (hilft auf In-Order CPUs wie dem A35)
+          OPT_FLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 \
+            -fno-strict-aliasing -fno-finite-math-only \
+            -fomit-frame-pointer -funroll-loops -pipe"
 
-              # ── Optimierte Compiler-Flags für Cortex-A35 (AArch64) ──────
-              # -O3: Aggressive Optimierung (Inline, Vektorisierung)
-              # -mcpu=cortex-a35: A35-spezifische Instruktionen (inkl. NEON)
-              # -mtune=cortex-a35: Optimiert den Instruction-Scheduler für den A35
-              # -funsafe-math-optimizations: Schnellere Gleitkomma-Mathematik
-              # -fomit-frame-pointer: Gibt das RBP-Register für Berechnungen frei
-              # -funroll-loops: Entrollt Schleifen, was auf In-Order CPUs wie dem A35 hilft
-              # (Hinweis: NEON ist auf AArch64 standardmäßig immer an.)
-              OPT_FLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 -funsafe-math-optimizations -fno-math-errno -fno-trapping-math -fomit-frame-pointer -funroll-loops -pipe"
+          export CC=aarch64-linux-gnu-gcc
 
-              # Compile FTE Engine Binary for PortMaster
-              make makelibs FTE_TARGET=linux_arm64 || true
-              make m-rel \
-                FTE_TARGET=linux_arm64 \
-                FTE_CONFIG=nzportable \
-                USE_SDL=2 \
-                NO_X11=1 \
-                NO_WAYLAND=1 \
-                NO_VULKAN=1 \
-                CPUOPTIMIZATIONS="${OPT_FLAGS}" \
-                -j"$(nproc)"
-            '
+          # makelibs parallelisieren (nutzt alle verfügbaren Kerne)
+          make makelibs FTE_TARGET=linux_arm64 -j"$(nproc)" || true
+
+          # Engine kompilieren mit optimierten Flags
+          make m-rel \
+            FTE_TARGET=linux_arm64 \
+            FTE_CONFIG=nzportable \
+            CC=aarch64-linux-gnu-gcc \
+            CPUOPTIMIZATIONS="${OPT_FLAGS}" \
+            USE_SDL=2 \
+            NO_X11=1 \
+            NO_WAYLAND=1 \
+            NO_VULKAN=1 \
+            -j"$(nproc)"
 
       - name: Stage Complete PortMaster Artifact
         run: |
           set -euo pipefail
           mkdir -p dist/nzp
 
-          # Locate and copy compiled binary safely
-          BIN=$(find . -maxdepth 5 -type f -executable \
+          # Find compiled aarch64 binary
+          BIN=$(find . -maxdepth 6 -type f -executable \
                 \( -iname "*arm64*" -o -iname "*aarch64*" -o -iname "fteqw*" -o -iname "*nzportable*" \) \
-                ! -iname "*.sh" | head -n 1)
+                ! -iname "*.sh" ! -iname "*.py" | head -n 1)
 
           if [ -z "${BIN}" ]; then
-            echo "Error: Engine binary not found after compilation!" && exit 1
+            echo "Error: Engine binary not found after compilation!"
+            find . -name "*.aarch64" -o -name "fteqw*" -o -name "*arm64*" | head -n 20
+            exit 1
           fi
 
           cp "${BIN}" dist/nzp/nzp.aarch64
@@ -96,6 +91,7 @@ jobs:
 
           echo "Final Artifact Contents:"
           ls -la dist/nzp/
+          file dist/nzp/nzp.aarch64
 
       - name: Upload PortMaster Ready Artifact
         uses: actions/upload-artifact@v4
