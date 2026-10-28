@@ -1,4 +1,4 @@
-name: Build NZP Engine (ARM64 Cross-Compile, GLIBC 2.31)
+name: Build NZP Engine (ARM64 Cross-Compile, GLIBC 2.31, KMSDRM)
 
 on:
   workflow_dispatch:
@@ -27,7 +27,7 @@ jobs:
           sed -i '/pbool PDECL PR_SSQC_CheckHeaderCrc/{n;s/{/{\n    return true; \/\/ NZP-M9: CRC check disabled/;}' "$PR_CMDS"
           grep -A3 "PR_SSQC_CheckHeaderCrc" "$PR_CMDS" | head -10
 
-      - name: Build in Ubuntu 20.04 container (GLIBC 2.31)
+      - name: Build in Ubuntu 20.04 container (GLIBC 2.31, SDL2 + KMSDRM)
         run: |
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/workspace" \
@@ -109,11 +109,9 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: nzp-aarch64-glibc231
+          name: nzp-aarch64-glibc231-kmsdrm
           path: |
             engine/release/nzportablearm64
             engine/release/nzportablearm64.db
-            engine/release/nzp.aarch64
-            engine/release/nzp-sdl
           if-no-files-found: error
           retention-days: 30
