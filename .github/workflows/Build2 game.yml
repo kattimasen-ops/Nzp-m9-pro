@@ -60,8 +60,8 @@ jobs:
               OPT_FLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 -funsafe-math-optimizations -fno-math-errno -fno-trapping-math -fomit-frame-pointer -funroll-loops -pipe"
 
               echo "=== Toolchain-Check ==="
-              aarch64-linux-gnu-gcc --version | head -1
-              ldd --version | head -1
+              aarch64-linux-gnu-gcc --version | head -1 || true
+              ldd --version | head -1 || true
 
               echo "=== Dependencies bauen (makelibs) ==="
               time make makelibs FTE_TARGET=linux_arm64
