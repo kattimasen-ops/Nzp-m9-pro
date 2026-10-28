@@ -27,7 +27,7 @@ jobs:
           sed -i '/pbool PDECL PR_SSQC_CheckHeaderCrc/{n;s/{/{\n    return true; \/\/ NZP-M9: CRC check disabled/;}' "$PR_CMDS"
           grep -A3 "PR_SSQC_CheckHeaderCrc" "$PR_CMDS" | head -10
 
-      - name: Build in Ubuntu 20.04 container (GLIBC 2.31, SDL2 + KMSDRM)
+      - name: Build in Ubuntu 20.04 container (GLIBC 2.31, SDL2 + KMSDRM Patches)
         run: |
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/workspace" \
@@ -40,32 +40,69 @@ jobs:
               apt-get install -y --no-install-recommends \
                 gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
                 binutils-aarch64-linux-gnu \
-                build-essential make git pkg-config wget ca-certificates \
+                build-essential make git pkg-config wget ca-certificates python3 \
                 libdrm-dev libgbm-dev libgles2-mesa-dev libegl1-mesa-dev \
                 libasound2-dev zlib1g-dev libpng-dev libjpeg-dev \
                 libx11-dev libxext-dev libxss-dev libxcb1-dev \
                 libxrandr-dev libxi-dev libxrender-dev libxtst-dev \
                 libxt-dev libxfixes-dev libxcursor-dev libxinerama-dev
 
-              # ── SDL2 mit KMSDRM-Unterstützung bauen ──
+              # ── 1. SDL2 herunterladen ──
               SDL2_VER="2.30.7"
-              if [ ! -f /usr/local/lib/libSDL2.a ]; then
-                cd /tmp
-                wget -q "https://github.com/libsdl-org/SDL/releases/download/release-${SDL2_VER}/SDL2-${SDL2_VER}.tar.gz"
-                tar xf "SDL2-${SDL2_VER}.tar.gz"
-                cd "SDL2-${SDL2_VER}"
-                ./configure --prefix=/usr/local \
-                  --host=aarch64-linux-gnu \
-                  --enable-video-kmsdrm \
-                  --disable-video-x11 \
-                  --disable-video-wayland \
-                  --disable-video-vulkan \
-                  --enable-video-opengles \
-                  --disable-shared --enable-static
-                make -j"$(nproc)"
-                make install
-              fi
+              cd /tmp
+              wget -q "https://github.com/libsdl-org/SDL/releases/download/release-${SDL2_VER}/SDL2-${SDL2_VER}.tar.gz"
+              tar xf "SDL2-${SDL2_VER}.tar.gz"
+              cd "SDL2-${SDL2_VER}"
 
+              # ── 2. SDL2 mit Mali-G31 KMSDRM-Fixes patchen ──
+              cat << "PYEOF" > /tmp/patch_kmsdrm.py
+              import sys, re, pathlib
+
+              # Fix 1: Window-Flag erzwingen (Mali-G31 braucht das für EGL)
+              path = pathlib.Path(sys.argv[1] + "/src/video/kmsdrm/SDL_kmsdrmvideo.c")
+              t = path.read_text()
+              marker = "NZP-M9-KMSDRM-WINDOW-FLAG"
+              if marker not in t:
+                  pattern = re.compile(r"(KMSDRM_CreateWindow\s*\([^)]*\)\s*\{)", re.DOTALL)
+                  m = pattern.search(t)
+                  if m:
+                      insert = "\n    /* " + marker + " */\n    if (!(window->flags & SDL_WINDOW_VULKAN)) {\n        window->flags |= SDL_WINDOW_OPENGL;\n    }\n"
+                      t = t[:m.end()] + insert + t[m.end():]
+                      path.write_text(t)
+                      print("OK: KMSDRM Window-Flag Patch angewendet.")
+                  else:
+                      print("WARNUNG: KMSDRM_CreateWindow nicht gefunden.")
+
+              # Fix 2: Pageflip Fallback (Mali-G31 stürzt bei Async-Flips ab)
+              t = path.read_text()
+              marker2 = "NZP-M9-PAGEFLIP-FALLBACK"
+              if marker2 not in t:
+                  pattern = re.compile(r"(ret = KMSDRM_drmModePageFlip\([^;]+;)", re.DOTALL)
+                  m = pattern.search(t)
+                  if m:
+                      fallback = "\n    /* " + marker2 + " */\n    if (ret != 0 && (flip_flags & DRM_MODE_PAGE_FLIP_ASYNC)) {\n        SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO, \"Async pageflip rejected; using synchronous flips.\");\n        viddata->async_pageflip_support = SDL_FALSE;\n        flip_flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;\n        ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id, fb_info->fb_id, flip_flags, &windata->waiting_for_flip);\n    }\n"
+                      t = t[:m.end()] + fallback + t[m.end():]
+                      path.write_text(t)
+                      print("OK: Pageflip-Fallback eingefügt.")
+                  else:
+                      print("WARNUNG: PageFlip-Aufruf nicht gefunden.")
+              PYEOF
+              
+              python3 /tmp/patch_kmsdrm.py .
+
+              # ── 3. SDL2 statisch mit KMSDRM kompilieren ──
+              ./configure --prefix=/usr/local \
+                --host=aarch64-linux-gnu \
+                --enable-video-kmsdrm \
+                --disable-video-x11 \
+                --disable-video-wayland \
+                --disable-video-vulkan \
+                --enable-video-opengles \
+                --disable-shared --enable-static
+              make -j"$(nproc)"
+              make install
+
+              # ── 4. FTEQW bauen ──
               cd /workspace/engine
 
               export CC=aarch64-linux-gnu-gcc
@@ -78,9 +115,10 @@ jobs:
 
               OPT_FLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 -funsafe-math-optimizations -fno-math-errno -fno-trapping-math -fomit-frame-pointer -funroll-loops -pipe"
 
-              echo "=== Toolchain-Check ==="
-              aarch64-linux-gnu-gcc --version | head -1 || true
-              ldd --version | head -1 || true
+              # SDL2 in den FTEQW-libs-Ordner kopieren, damit makelibs es nicht überschreibt
+              mkdir -p libs-aarch64-linux-gnu
+              cp /usr/local/lib/libSDL2.a libs-aarch64-linux-gnu/
+              cp -r /usr/local/include/SDL2 libs-aarch64-linux-gnu/
 
               echo "=== Dependencies bauen (makelibs) ==="
               time make makelibs FTE_TARGET=linux_arm64
