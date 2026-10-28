@@ -25,11 +25,24 @@ jobs:
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
             make pkg-config
 
+      - name: Patch Engine (disable progs.dat CRC check)
+        run: |
+          set -euo pipefail
+          # Finde die Datei pr_cmds.c im Engine-Verzeichnis
+          PR_CMDS=$(find . -path "*/engine/server/pr_cmds.c" | head -n 1)
+          if [ -z "$PR_CMDS" ]; then
+            echo "FEHLER: pr_cmds.c nicht gefunden!"
+            exit 1
+          fi
+          echo "Patche $PR_CMDS"
+          # Füge 'return true;' direkt nach der öffnenden Klammer von PR_SSQC_CheckHeaderCrc ein
+          sed -i '/pbool PDECL PR_SSQC_CheckHeaderCrc/{n;s/{/{\n    return true; \/\/ NZP-M9: CRC check disabled/;}' "$PR_CMDS"
+          echo "=== Gepatchte Funktion ==="
+          grep -A3 "PR_SSQC_CheckHeaderCrc" "$PR_CMDS" | head -20
+
       - name: Compile FTE Engine (Cross-Compile for aarch64)
         run: |
           set -euo pipefail
-
-          # Locate Makefile inside fteqw source directory
           if [ -f "engine/Makefile" ]; then
             cd engine
           else
@@ -41,24 +54,14 @@ jobs:
             cd "$(dirname "${MAKEFILE_PATH}")"
           fi
 
-          # ── Optimierte Compiler-Flags für Cortex-A35 (AArch64) ──────
-          # -O3: Aggressive Optimierung (beibehalten wie gewünscht)
-          # -mcpu=cortex-a35: A35-spezifische Instruktionen (inkl. NEON)
-          # -mtune=cortex-a35: Optimiert den Instruction-Scheduler für den A35
-          # -fno-strict-aliasing: Quake-Engine-Code verlässt sich auf Typ-Punning
-          # -fno-finite-math-only: Konservativer als -funsafe-math-optimizations
-          # -fomit-frame-pointer: Gibt das RBP-Register für Berechnungen frei
-          # -funroll-loops: Entrollt Schleifen (hilft auf In-Order CPUs wie dem A35)
           OPT_FLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 \
             -fno-strict-aliasing -fno-finite-math-only \
             -fomit-frame-pointer -funroll-loops -pipe"
 
           export CC=aarch64-linux-gnu-gcc
 
-          # makelibs parallelisieren (nutzt alle verfügbaren Kerne)
           make makelibs FTE_TARGET=linux_arm64 -j"$(nproc)" || true
 
-          # Engine kompilieren mit optimierten Flags
           make m-rel \
             FTE_TARGET=linux_arm64 \
             FTE_CONFIG=nzportable \
@@ -74,21 +77,15 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist/nzp
-
-          # Find compiled aarch64 binary
           BIN=$(find . -maxdepth 6 -type f -executable \
                 \( -iname "*arm64*" -o -iname "*aarch64*" -o -iname "fteqw*" -o -iname "*nzportable*" \) \
                 ! -iname "*.sh" ! -iname "*.py" | head -n 1)
-
           if [ -z "${BIN}" ]; then
             echo "Error: Engine binary not found after compilation!"
-            find . -name "*.aarch64" -o -name "fteqw*" -o -name "*arm64*" | head -n 20
             exit 1
           fi
-
           cp "${BIN}" dist/nzp/nzp.aarch64
           chmod +x dist/nzp/nzp.aarch64
-
           echo "Final Artifact Contents:"
           ls -la dist/nzp/
           file dist/nzp/nzp.aarch64
