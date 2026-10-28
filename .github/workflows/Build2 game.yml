@@ -36,7 +36,8 @@ jobs:
             make pkg-config \
             libgl-dev:arm64 libgles2-mesa-dev:arm64 libegl1-mesa-dev:arm64 \
             libglx-dev:arm64 libgl1-mesa-dev:arm64 \
-            libpng-dev:arm64 libjpeg-dev:arm64 zlib1g-dev:arm64
+            libpng-dev:arm64 libjpeg-dev:arm64 zlib1g-dev:arm64 \
+            libasound2-dev:arm64 libpulse-dev:arm64
 
       - name: Patch Engine (disable progs.dat CRC check)
         run: |
@@ -66,10 +67,10 @@ jobs:
             cd "$(dirname "${MAKEFILE_PATH}")"
           fi
 
-          # WICHTIG: -DNO_X11 muss in OPT_FLAGS stehen, damit der Präprozessor
-          # den X11-Code in gl_vidlinuxglx.c vollständig entfernt.
+          # WICHTIG: -DNO_X11, -DNO_ALSA und -DNO_PULSE müssen in OPT_FLAGS stehen,
+          # damit der Präprozessor die entsprechenden Code-Zweige vollständig entfernt.
           OPT_FLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 \
-            -DNO_X11 \
+            -DNO_X11 -DNO_ALSA -DNO_PULSE \
             -fno-strict-aliasing -fno-finite-math-only \
             -fomit-frame-pointer -funroll-loops -pipe"
 
