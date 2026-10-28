@@ -27,7 +27,6 @@ jobs:
           sed -i '/pbool PDECL PR_SSQC_CheckHeaderCrc/{n;s/{/{\n    return true; \/\/ NZP-M9: CRC check disabled/;}' "$PR_CMDS"
           grep -A3 "PR_SSQC_CheckHeaderCrc" "$PR_CMDS" | head -10
 
-      # ── ALLE X11-Header installieren, sonst bricht gl_vidlinuxglx.c ab ──
       - name: Install ARM64 cross toolchain & ALL X11 headers
         run: |
           sudo apt-get update
@@ -41,7 +40,6 @@ jobs:
             libxrandr-dev libxi-dev libxrender-dev libxtst-dev \
             libxt-dev libxfixes-dev libxcursor-dev libxinerama-dev
 
-      # ── PRE-FLIGHT: prüft vor dem Build, ob alle X11-Header da sind ──
       - name: Verify X11 headers present
         run: |
           set -euo pipefail
@@ -110,19 +108,42 @@ jobs:
         if: success()
         run: |
           set -euo pipefail
-          BIN=$(find engine/release -type f \( -name "nzp.aarch64" -o -name "nzp-sdl" -o -name "fteqw*" \) 2>/dev/null | head -1)
+
+          # FTEQW erzeugt nzportablearm64 (+ .db Debug-Symbole).
+          # Ältere Muster bleiben als Fallback drin.
+          BIN=$(find engine/release -maxdepth 1 -type f \
+            \( -name "nzportablearm64" \
+               -o -name "nzportable*" \
+               -o -name "nzp.aarch64" \
+               -o -name "nzp-sdl" \
+               -o -name "fteqw*" \) 2>/dev/null \
+            | grep -v '\.db$' | head -1)
+
           if [ -z "$BIN" ]; then
             echo "FEHLER: Binary nicht gefunden!"
-            find engine/release -type f | head -40
+            echo "--- engine/release/ Inhalt (Top-Level) ---"
+            find engine/release -maxdepth 1 -type f
             exit 1
           fi
+
+          echo "=== Binary-Info ==="
           file "$BIN"
+          ls -la "$BIN"
+
           if ! file "$BIN" | grep -q "ARM aarch64"; then
             echo "FEHLER: Binary ist NICHT ARM64!"
             exit 1
           fi
           echo "OK: Binary ist ARM64"
-          ls -la "$BIN"
+
+          # Debug-Symbole mit auflisten (falls vorhanden)
+          DB="${BIN}.db"
+          if [ -f "$DB" ]; then
+            echo "Debug-Symbole:"
+            ls -la "$DB"
+          fi
+
+          echo "BINARY_PATH=$BIN" >> "$GITHUB_ENV"
 
       - name: Upload artifact
         if: success()
@@ -130,8 +151,10 @@ jobs:
         with:
           name: nzp-aarch64-cross
           path: |
-            engine/release/**/nzp.aarch64
-            engine/release/**/nzp-sdl
-            engine/release/**/fteqw*
+            engine/release/nzportablearm64
+            engine/release/nzportablearm64.db
+            engine/release/nzp.aarch64
+            engine/release/nzp-sdl
+            engine/release/fteqw*
           if-no-files-found: error
           retention-days: 30
