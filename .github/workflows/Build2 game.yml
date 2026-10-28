@@ -28,8 +28,6 @@ jobs:
             exit 1
           fi
           echo "Patche $PR_CMDS"
-          # Deaktiviert die CRC-Prüfung: Die Funktion gibt sofort true zurück,
-          # bevor der eigentliche Header-Check ausgeführt wird.
           sed -i '/pbool PDECL PR_SSQC_CheckHeaderCrc/{n;s/{/{\n    return true; \/\/ NZP-M9: CRC check disabled/;}' "$PR_CMDS"
           echo "=== Gepatchte Funktion ==="
           grep -A3 "PR_SSQC_CheckHeaderCrc" "$PR_CMDS" | head -20
@@ -37,7 +35,7 @@ jobs:
       - name: Set up QEMU (ARM64 Emulation)
         uses: docker/setup-qemu-action@v3
 
-      - name: Compile FTE Engine in ARM64 Container
+      - name: Compile FTE Engine in ARM64 Container with SDL2+KMSDRM
         run: |
           docker run --rm --platform linux/arm64 -v "${{ github.workspace }}:/workspace" -w /workspace \
             arm64v8/ubuntu:20.04 bash -c '
@@ -46,33 +44,42 @@ jobs:
 
               apt-get update && apt-get install -y --no-install-recommends \
                 build-essential make git curl wget ca-certificates pkg-config perl \
-                libsdl2-dev libgles2-mesa-dev libegl1-mesa-dev libasound2-dev zlib1g-dev
+                libdrm-dev libgbm-dev libgles2-mesa-dev libegl1-mesa-dev \
+                libasound2-dev zlib1g-dev libpng-dev libjpeg-dev
 
+              # ── SDL2 mit KMSDRM-Unterstützung aus dem Quellcode bauen ──
+              SDL2_VER="2.30.7"
+              cd /tmp
+              wget -q "https://github.com/libsdl-org/SDL/releases/download/release-${SDL2_VER}/SDL2-${SDL2_VER}.tar.gz"
+              tar xf "SDL2-${SDL2_VER}.tar.gz"
+              cd "SDL2-${SDL2_VER}"
+              ./configure --prefix=/usr/local \
+                --enable-video-kmsdrm \
+                --disable-video-x11 \
+                --disable-video-wayland \
+                --disable-video-vulkan \
+                --enable-video-opengles \
+                --disable-shared --enable-static
+              make -j"$(nproc)"
+              make install
+
+              cd /workspace
               git config --global --add safe.directory /workspace
               git config --global --add safe.directory "*"
 
               if [ -f "engine/Makefile" ]; then
-                echo "Located Makefile in engine/ directory."
                 cd engine
               elif [ -f "Makefile" ]; then
-                echo "Located Makefile in root directory."
+                :
               else
                 MAKEFILE_PATH=$(find . -maxdepth 4 \( -iname "makefile" -o -iname "GNUmakefile" \) | head -n 1)
-                if [ -n "${MAKEFILE_PATH}" ]; then
-                  BUILD_DIR=$(dirname "${MAKEFILE_PATH}")
-                  echo "Located Makefile at: ${MAKEFILE_PATH} (Directory: ${BUILD_DIR})"
-                  cd "${BUILD_DIR}"
-                else
-                  echo "Error: Could not locate Makefile!"
-                  ls -la
-                  exit 1
-                fi
+                [ -n "${MAKEFILE_PATH}" ] && cd "$(dirname "${MAKEFILE_PATH}")" || { echo "Makefile not found"; exit 1; }
               fi
 
+              # Cortex-A35 Optimierungen
               OPT_FLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 -funsafe-math-optimizations -fno-math-errno -fno-trapping-math -fomit-frame-pointer -funroll-loops -pipe"
 
-              # WICHTIG: makelibs MUSS erfolgreich sein (kein || true),
-              # sonst fehlen die ARM64-Bibliotheken und der Linker schlägt fehl.
+              # WICHTIG: makelibs MUSS erfolgreich sein, damit die ARM64-Bibliotheken vorhanden sind
               make makelibs FTE_TARGET=linux_arm64
               make m-rel \
                 FTE_TARGET=linux_arm64 \
