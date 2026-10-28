@@ -53,34 +53,42 @@ jobs:
           echo "=== Gepatchte Funktion ==="
           grep -A3 "PR_SSQC_CheckHeaderCrc" "$PR_CMDS" | head -20
 
-      - name: Patch Makefile for EGL Backend
+      - name: Patch Makefile for EGL Backend (Robust)
         run: |
           set -euo pipefail
           cd engine
 
-          # 1) EGL-Code in gl_videgl.c aktivieren (Präprozessor-Makro)
-          #    GLCFLAGS ist die Makefile-Variable für GL-spezifische CFLAGS.
-          if grep -q '^GLCFLAGS?=-DGLQUAKE' Makefile; then
-            sed -i 's/^GLCFLAGS?=-DGLQUAKE/GLCFLAGS?=-DGLQUAKE -DUSE_EGL/' Makefile
-            echo "GLCFLAGS um -DUSE_EGL erweitert."
-          else
-            # Fallback: GLCFLAGS direkt überschreiben
-            echo "WARNUNG: GLCFLAGS-Zeile nicht gefunden. Setze GLCFLAGS als Make-Variable."
+          # 1) -DUSE_EGL und -DNO_X11 in GLCFLAGS aufnehmen.
+          #    GLCFLAGS wird für alle GL-Quelldateien verwendet (gl_vidsdl.c, gl_videgl.c, ...).
+          #    Der sed-Befehl fügt die Flags hinzu, falls sie noch nicht vorhanden sind.
+          if ! grep -q 'GLCFLAGS.*DUSE_EGL' Makefile; then
+            sed -i 's/^GLCFLAGS?=-DGLQUAKE/GLCFLAGS?=-DGLQUAKE -DUSE_EGL -DNO_X11/' Makefile
+            echo "GLCFLAGS um -DUSE_EGL -DNO_X11 erweitert."
           fi
 
-          # 2) gl_videgl.o zur Linkliste des GL-Clients hinzufügen
-          if ! grep -q 'GLCL_OBJS=.*gl_videgl.o' Makefile; then
-            sed -i 's/^GLCL_OBJS=/GLCL_OBJS=gl_videgl.o /' Makefile
-            echo "gl_videgl.o zu GLCL_OBJS hinzugefügt."
-          else
-            echo "gl_videgl.o ist bereits in GLCL_OBJS."
+          # 2) gl_videgl.o zu ALLEN MCL_OBJS-Zeilen hinzufügen.
+          #    Es gibt mehrere MCL_OBJS-Definitionen für verschiedene Targets.
+          #    Der sed-Befehl hängt gl_videgl.o an jede Zeile an, die mit MCL_OBJS= beginnt.
+          #    Das stellt sicher, dass das Objekt kompiliert und gelinkt wird, egal welches
+          #    Target letztlich greift.
+          if ! grep -q 'MCL_OBJS=.*gl_videgl\.o' Makefile; then
+            sed -i '/^MCL_OBJS=/s/$/ gl_videgl.o/' Makefile
+            echo "gl_videgl.o zu MCL_OBJS hinzugefügt."
           fi
 
-          # 3) Kontrolle: Zeigt die relevanten Zeilen
+          # 3) -lEGL zu GLLDFLAGS hinzufügen (falls nicht vorhanden).
+          #    Stellt sicher, dass die EGL-Bibliothek beim Linken verfügbar ist.
+          if ! grep -q 'GLLDFLAGS.*-lEGL' Makefile; then
+            sed -i '/^GLLDFLAGS=/s/$/ -lEGL/' Makefile
+            echo "-lEGL zu GLLDFLAGS hinzugefügt."
+          fi
+
           echo "=== GLCFLAGS ==="
           grep '^GLCFLAGS' Makefile | head -1
-          echo "=== GLCL_OBJS (Ausschnitt) ==="
-          grep '^GLCL_OBJS' Makefile | head -1
+          echo "=== MCL_OBJS (Ausschnitt) ==="
+          grep '^MCL_OBJS' Makefile | head -1
+          echo "=== GLLDFLAGS (Ausschnitt) ==="
+          grep '^GLLDFLAGS' Makefile | head -1
 
       - name: Build Engine
         run: |
@@ -96,17 +104,13 @@ jobs:
           export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
           export PKG_CONFIG_SYSROOT_DIR=/
 
-          # ARM64 static libraries
           make makelibs FTE_TARGET=linux_arm64
 
-          # Engine build – GLCFLAGS wird zusätzlich als Make-Variable
-          # übergeben, um -DUSE_EGL in jedem Fall zu setzen.
           make m-rel \
             FTE_TARGET=linux_arm64 \
             FTE_CONFIG=nzportable \
             CC=aarch64-linux-gnu-gcc \
             CPUOPTIMIZATIONS="${OPT_FLAGS}" \
-            GLCFLAGS="-DGLQUAKE -DUSE_EGL" \
             USE_SDL=2 \
             NO_X11=1 \
             NO_WAYLAND=1 \
