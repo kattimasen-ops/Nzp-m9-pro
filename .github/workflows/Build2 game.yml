@@ -17,25 +17,31 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Install Cross-Compiler Toolchain
+      - name: Install Cross-Compiler Toolchain & arm64 GL Headers
         run: |
           set -euo pipefail
+          sudo dpkg --add-architecture arm64
+          
+          # arm64-Ports-Quellen hinzufügen (falls Standard-Repos die Pakete nicht bieten)
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -cs) main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/arm64-ports.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -cs)-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64-ports.list
+          
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            make pkg-config
+            make pkg-config pkg-config-aarch64-linux-gnu \
+            libgl-dev:arm64 libgles2-mesa-dev:arm64 libegl1-mesa-dev:arm64 \
+            libglx-dev:arm64 libgl1-mesa-dev:arm64
 
       - name: Patch Engine (disable progs.dat CRC check)
         run: |
           set -euo pipefail
-          # Finde die Datei pr_cmds.c im Engine-Verzeichnis
           PR_CMDS=$(find . -path "*/engine/server/pr_cmds.c" | head -n 1)
           if [ -z "$PR_CMDS" ]; then
             echo "FEHLER: pr_cmds.c nicht gefunden!"
             exit 1
           fi
           echo "Patche $PR_CMDS"
-          # Füge 'return true;' direkt nach der öffnenden Klammer von PR_SSQC_CheckHeaderCrc ein
           sed -i '/pbool PDECL PR_SSQC_CheckHeaderCrc/{n;s/{/{\n    return true; \/\/ NZP-M9: CRC check disabled/;}' "$PR_CMDS"
           echo "=== Gepatchte Funktion ==="
           grep -A3 "PR_SSQC_CheckHeaderCrc" "$PR_CMDS" | head -20
@@ -59,6 +65,7 @@ jobs:
             -fomit-frame-pointer -funroll-loops -pipe"
 
           export CC=aarch64-linux-gnu-gcc
+          export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
 
           make makelibs FTE_TARGET=linux_arm64 -j"$(nproc)" || true
 
