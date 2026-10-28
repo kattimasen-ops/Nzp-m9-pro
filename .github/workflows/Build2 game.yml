@@ -67,17 +67,18 @@ jobs:
             cd "$(dirname "${MAKEFILE_PATH}")"
           fi
 
-          # WICHTIG: -DNO_X11, -DNO_ALSA und -DNO_PULSE müssen in OPT_FLAGS stehen,
-          # damit der Präprozessor die entsprechenden Code-Zweige vollständig entfernt.
+          # WICHTIG: Kein -DNO_ALSA, wir wollen ALSA nutzen!
           OPT_FLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 \
-            -DNO_X11 -DNO_ALSA -DNO_PULSE \
+            -DNO_X11 \
             -fno-strict-aliasing -fno-finite-math-only \
             -fomit-frame-pointer -funroll-loops -pipe"
 
           export CC=aarch64-linux-gnu-gcc
           export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+          export PKG_CONFIG_SYSROOT_DIR=/
 
-          make makelibs FTE_TARGET=linux_arm64 || true
+          # makelibs MUSS erfolgreich sein, sonst fehlen die ARM64-Bibliotheken!
+          make makelibs FTE_TARGET=linux_arm64
 
           make m-rel \
             FTE_TARGET=linux_arm64 \
