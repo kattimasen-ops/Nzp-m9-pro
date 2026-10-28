@@ -66,7 +66,10 @@ jobs:
             cd "$(dirname "${MAKEFILE_PATH}")"
           fi
 
+          # WICHTIG: -DNO_X11 muss in OPT_FLAGS stehen, damit der Präprozessor
+          # den X11-Code in gl_vidlinuxglx.c vollständig entfernt.
           OPT_FLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 \
+            -DNO_X11 \
             -fno-strict-aliasing -fno-finite-math-only \
             -fomit-frame-pointer -funroll-loops -pipe"
 
