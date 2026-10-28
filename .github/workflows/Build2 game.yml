@@ -4,6 +4,9 @@ on:
   push:
     branches: [ main, master ]
   workflow_dispatch:
+  schedule:
+    # Täglich 03:00 UTC – baut automatisch mit der neuesten Source
+    - cron: '0 3 * * *'
 
 jobs:
   build-portmaster-package:
@@ -22,6 +25,7 @@ jobs:
         with:
           repository: kattimasen-ops/Nzp-m9-pro
           path: quakec-src
+          ref: main
           fetch-depth: 1
 
       - name: Install Cross-Compilation Dependencies (ARM64)
@@ -58,19 +62,20 @@ jobs:
           set -euo pipefail
           cd engine
 
-          # 1) -DUSE_EGL in GLCFLAGS aufnehmen.
-          #    Aktiviert den EGL-Code in gl_vidsdl.c (das die fehlenden
-          #    Symbole GLVID_Init und eglrendererinfo bereitstellt).
-          if ! grep -q 'GLCFLAGS.*DUSE_EGL' Makefile; then
-            sed -i 's/^GLCFLAGS?=-DGLQUAKE/GLCFLAGS?=-DGLQUAKE -DUSE_EGL/' Makefile
-            echo "GLCFLAGS um -DUSE_EGL erweitert."
+          # 1) -DUSE_EGL an GL_CFLAGS anhängen (die tatsächliche Variable der Makefile).
+          #    Aktiviert den EGL-Code in gl_vidsdl.c, das die fehlenden
+          #    GLVID_*-Symbole bereitstellt.
+          if ! grep -q 'GL_CFLAGS.*DUSE_EGL' Makefile; then
+            # Es gibt mehrere Zuweisungen für GL_CFLAGS (z.B. +=).
+            # Wir hängen -DUSE_EGL an jede Zeile an, die mit GL_CFLAGS beginnt.
+            sed -i '/^GL_CFLAGS/s/$/ -DUSE_EGL/' Makefile
+            echo "GL_CFLAGS um -DUSE_EGL erweitert (alle Vorkommen)."
           else
-            echo "GLCFLAGS enthält bereits -DUSE_EGL."
+            echo "GL_CFLAGS enthält bereits -DUSE_EGL."
           fi
 
           # 2) -lEGL an CLIENTLDDEPS anhängen (Linker-Flags für den Client).
-          #    CLIENTLDDEPS ist die Makefile-Variable, die die Link-
-          #    Abhängigkeiten des Clients enthält.
+          #    Stellt sicher, dass die EGL-Bibliothek beim Linken verfügbar ist.
           if ! grep -q 'CLIENTLDDEPS=.*-lEGL' Makefile; then
             sed -i '/^CLIENTLDDEPS=/s/$/ -lEGL/' Makefile
             echo "-lEGL zu CLIENTLDDEPS hinzugefügt."
@@ -78,9 +83,9 @@ jobs:
             echo "CLIENTLDDEPS enthält bereits -lEGL."
           fi
 
-          # Kontrolle: Zeigt die relevanten Zeilen
-          echo "=== GLCFLAGS ==="
-          grep '^GLCFLAGS' Makefile | head -1
+          # 3) Kontrolle: Zeigt die relevanten Zeilen
+          echo "=== GL_CFLAGS (alle Vorkommen) ==="
+          grep '^GL_CFLAGS' Makefile
           echo "=== CLIENTLDDEPS ==="
           grep '^CLIENTLDDEPS=' Makefile | head -1
 
