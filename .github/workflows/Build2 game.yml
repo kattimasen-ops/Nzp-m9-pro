@@ -1,17 +1,16 @@
-name: Build NZP PortMaster Engine (RK3326 / ArkOS)
+name: Build NZP Engine (ARM64 Cross-Compile, kein QEMU)
 
 on:
-  push:
-    branches: [ main, master ]
   workflow_dispatch:
-  schedule:
-    - cron: '0 3 * * *'
+  push:
+    branches: [master]
 
 jobs:
-  build-portmaster-package:
+  build-arm64-cross:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
     steps:
-      - name: Checkout nzp-team/fteqw Engine Repository
+      - name: Checkout fteqw
         uses: actions/checkout@v4
         with:
           repository: nzp-team/fteqw
@@ -19,101 +18,80 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Patch PR_SSQC_CheckHeaderCrc (Bypass CRC Check)
+      - name: Patch CRC check (NZP-M9)
         run: |
           set -euo pipefail
           PR_CMDS=$(find . -path "*/engine/server/pr_cmds.c" | head -n 1)
-          if [ -z "$PR_CMDS" ]; then
-            echo "FEHLER: pr_cmds.c nicht gefunden!"
-            exit 1
-          fi
-          echo "Patche $PR_CMDS"
+          [ -n "$PR_CMDS" ] || { echo "FEHLER: pr_cmds.c nicht gefunden"; exit 1; }
           sed -i '/pbool PDECL PR_SSQC_CheckHeaderCrc/{n;s/{/{\n    return true; \/\/ NZP-M9: CRC check disabled/;}' "$PR_CMDS"
-          echo "=== Gepatchte Funktion ==="
-          grep -A3 "PR_SSQC_CheckHeaderCrc" "$PR_CMDS" | head -20
+          grep -A3 "PR_SSQC_CheckHeaderCrc" "$PR_CMDS" | head -10
 
-      - name: Set up QEMU (ARM64 Emulation)
-        uses: docker/setup-qemu-action@v3
-
-      - name: Compile FTE Engine in ARM64 Container with SDL2+KMSDRM
+      # ARM64-Cross-Toolchain auf dem x86_64-Runner installieren
+      - name: Install ARM64 cross toolchain
         run: |
-          docker run --rm --platform linux/arm64 -v "${{ github.workspace }}:/workspace" -w /workspace \
-            arm64v8/ubuntu:20.04 bash -c '
-              set -euo pipefail
-              export DEBIAN_FRONTEND=noninteractive
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            build-essential make git pkg-config \
+            libdrm-dev libgbm-dev libgles2-mesa-dev libegl1-mesa-dev \
+            libasound2-dev zlib1g-dev libpng-dev libjpeg-dev \
+            libx11-dev libxext-dev libxss-dev libxcb1-dev \
+            cmake ninja-build
 
-              apt-get update && apt-get install -y --no-install-recommends \
-                build-essential make git curl wget ca-certificates pkg-config perl \
-                libdrm-dev libgbm-dev libgles2-mesa-dev libegl1-mesa-dev \
-                libasound2-dev zlib1g-dev libpng-dev libjpeg-dev
+      # Cache für cross-kompilierte Abhängigkeiten (nur beim ersten Run nötig)
+      - name: Cache ARM64 deps
+        uses: actions/cache@v4
+        with:
+          path: engine/libs-aarch64-linux-gnu
+          key: cross-deps-aarch64-v1
+          restore-keys: cross-deps-aarch64-
 
-              # ── SDL2 mit KMSDRM-Unterstützung aus dem Quellcode bauen ──
-              SDL2_VER="2.30.7"
-              cd /tmp
-              wget -q "https://github.com/libsdl-org/SDL/releases/download/release-${SDL2_VER}/SDL2-${SDL2_VER}.tar.gz"
-              tar xf "SDL2-${SDL2_VER}.tar.gz"
-              cd "SDL2-${SDL2_VER}"
-              ./configure --prefix=/usr/local \
-                --enable-video-kmsdrm \
-                --disable-video-x11 \
-                --disable-video-wayland \
-                --disable-video-vulkan \
-                --enable-video-opengles \
-                --disable-shared --enable-static
-              make -j"$(nproc)"
-              make install
-
-              cd /workspace
-              git config --global --add safe.directory /workspace
-              git config --global --add safe.directory "*"
-
-              if [ -f "engine/Makefile" ]; then
-                cd engine
-              elif [ -f "Makefile" ]; then
-                :
-              else
-                MAKEFILE_PATH=$(find . -maxdepth 4 \( -iname "makefile" -o -iname "GNUmakefile" \) | head -n 1)
-                [ -n "${MAKEFILE_PATH}" ] && cd "$(dirname "${MAKEFILE_PATH}")" || { echo "Makefile not found"; exit 1; }
-              fi
-
-              # Cortex-A35 Optimierungen
-              OPT_FLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 -funsafe-math-optimizations -fno-math-errno -fno-trapping-math -fomit-frame-pointer -funroll-loops -pipe"
-
-              # WICHTIG: makelibs MUSS erfolgreich sein, damit die ARM64-Bibliotheken vorhanden sind
-              make makelibs FTE_TARGET=linux_arm64
-              make m-rel \
-                FTE_TARGET=linux_arm64 \
-                FTE_CONFIG=nzportable \
-                USE_SDL=2 \
-                NO_X11=1 \
-                NO_WAYLAND=1 \
-                NO_VULKAN=1 \
-                CPUOPTIMIZATIONS="${OPT_FLAGS}" \
-                -j"$(nproc)"
-            '
-
-      - name: Stage Complete PortMaster Artifact
+      - name: Build ARM64 (cross-compile, kein QEMU)
+        env:
+          CC: aarch64-linux-gnu-gcc
+          CXX: aarch64-linux-gnu-g++
+          AR: aarch64-linux-gnu-ar
+          RANLIB: aarch64-linux-gnu-ranlib
+          STRIP: aarch64-linux-gnu-strip
+          PKG_CONFIG_LIBDIR: /workspace/engine/libs-aarch64-linux-gnu
+          PKG_CONFIG_SYSROOT_DIR: /workspace/engine/libs-aarch64-linux-gnu
         run: |
           set -euo pipefail
-          mkdir -p dist/nzp
+          cd engine
 
-          BIN=$(find . -maxdepth 5 -type f -executable \
-                \( -iname "*arm64*" -o -iname "*aarch64*" -o -iname "fteqw*" -o -iname "*nzportable*" \) \
-                ! -iname "*.sh" | head -n 1)
+          OPT_FLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 -funsafe-math-optimizations -fno-math-errno -fno-trapping-math -fomit-frame-pointer -funroll-loops -pipe"
 
-          if [ -z "${BIN}" ]; then
-            echo "Error: Engine binary not found after compilation!" && exit 1
-          fi
+          # 1) Abhängigkeiten für ARM64 bauen (makelibs nutzt CC/AR aus der Umgebung)
+          make makelibs FTE_TARGET=linux_arm64
 
-          cp "${BIN}" dist/nzp/nzp.aarch64
-          chmod +x dist/nzp/nzp.aarch64
+          # 2) Engine cross-kompilieren
+          time make m-rel \
+            FTE_TARGET=linux_arm64 \
+            FTE_CONFIG=nzportable \
+            USE_SDL=2 \
+            NO_X11=1 \
+            X11QUAKE= \
+            CC="${CC}" \
+            CXX="${CXX}" \
+            CPUOPTIMIZATIONS="${OPT_FLAGS}" \
+            -j"$(nproc)"
 
-          echo "Final Artifact Contents:"
-          ls -la dist/nzp/
+      - name: Locate binary
+        if: success()
+        run: |
+          BIN=$(find engine/release -type f \( -name "nzp.aarch64" -o -name "nzp-sdl" -o -name "fteqw*" \) 2>/dev/null | head -1)
+          [ -n "$BIN" ] || { echo "Binary nicht gefunden"; exit 1; }
+          file "$BIN"   # muss "ARM aarch64" zeigen
+          ls -la "$BIN"
+          echo "BINARY_PATH=$BIN" >> "$GITHUB_ENV"
 
-      - name: Upload PortMaster Ready Artifact
+      - name: Upload artifact
+        if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: nzp-m9pro-portmaster-complete
-          path: dist/nzp/
+          name: nzp-aarch64-cross
+          path: |
+            engine/release/**/nzp.aarch64
+            engine/release/**/nzp-sdl
+            engine/release/**/fteqw*
           if-no-files-found: error
