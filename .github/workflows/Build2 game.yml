@@ -8,7 +8,8 @@ on:
 jobs:
   build-arm64-cross:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
+
     steps:
       - name: Checkout fteqw
         uses: actions/checkout@v4
@@ -18,34 +19,48 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
+      # ─────────────────────────────────────────────────────────────
+      # CRC-Patch: NZP eigene .dat-Dateien laden
+      # ─────────────────────────────────────────────────────────────
       - name: Patch CRC check (NZP-M9)
         run: |
           set -euo pipefail
           PR_CMDS=$(find . -path "*/engine/server/pr_cmds.c" | head -n 1)
           [ -n "$PR_CMDS" ] || { echo "FEHLER: pr_cmds.c nicht gefunden"; exit 1; }
+          echo "Patche $PR_CMDS"
           sed -i '/pbool PDECL PR_SSQC_CheckHeaderCrc/{n;s/{/{\n    return true; \/\/ NZP-M9: CRC check disabled/;}' "$PR_CMDS"
+          echo "=== Gepatchte Funktion ==="
           grep -A3 "PR_SSQC_CheckHeaderCrc" "$PR_CMDS" | head -10
 
-      # ARM64-Cross-Toolchain auf dem x86_64-Runner installieren
-      - name: Install ARM64 cross toolchain
+      # ─────────────────────────────────────────────────────────────
+      # ARM64 Cross-Toolchain + alle Header (inkl. X11)
+      # ─────────────────────────────────────────────────────────────
+      - name: Install ARM64 cross toolchain & X11 headers
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
             build-essential make git pkg-config \
             libdrm-dev libgbm-dev libgles2-mesa-dev libegl1-mesa-dev \
             libasound2-dev zlib1g-dev libpng-dev libjpeg-dev \
             libx11-dev libxext-dev libxss-dev libxcb1-dev \
-            cmake ninja-build
+            libxrandr-dev libxi-dev libxrender-dev libxtst-dev libxt-dev \
+            libxfixes-dev libxcursor-dev libxinerama-dev
 
-      # Cache für cross-kompilierte Abhängigkeiten (nur beim ersten Run nötig)
+      # ─────────────────────────────────────────────────────────────
+      # Cache für ARM64-Dependencies (nur 1. Run baut sie)
+      # ─────────────────────────────────────────────────────────────
       - name: Cache ARM64 deps
         uses: actions/cache@v4
         with:
           path: engine/libs-aarch64-linux-gnu
-          key: cross-deps-aarch64-v1
+          key: cross-deps-aarch64-v2
           restore-keys: cross-deps-aarch64-
 
+      # ─────────────────────────────────────────────────────────────
+      # Build: Cross-Compile ohne QEMU
+      # ─────────────────────────────────────────────────────────────
       - name: Build ARM64 (cross-compile, kein QEMU)
         env:
           CC: aarch64-linux-gnu-gcc
@@ -53,38 +68,65 @@ jobs:
           AR: aarch64-linux-gnu-ar
           RANLIB: aarch64-linux-gnu-ranlib
           STRIP: aarch64-linux-gnu-strip
-          PKG_CONFIG_LIBDIR: /workspace/engine/libs-aarch64-linux-gnu
-          PKG_CONFIG_SYSROOT_DIR: /workspace/engine/libs-aarch64-linux-gnu
+          PKG_CONFIG_LIBDIR: /home/runner/work/Nzp-m9-pro/Nzp-m9-pro/engine/libs-aarch64-linux-gnu
+          PKG_CONFIG_SYSROOT_DIR: /home/runner/work/Nzp-m9-pro/Nzp-m9-pro/engine/libs-aarch64-linux-gnu
         run: |
           set -euo pipefail
           cd engine
 
           OPT_FLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 -funsafe-math-optimizations -fno-math-errno -fno-trapping-math -fomit-frame-pointer -funroll-loops -pipe"
 
-          # 1) Abhängigkeiten für ARM64 bauen (makelibs nutzt CC/AR aus der Umgebung)
-          make makelibs FTE_TARGET=linux_arm64
+          echo "=== Toolchain-Check ==="
+          aarch64-linux-gnu-gcc --version | head -1
+          aarch64-linux-gnu-g++ --version | head -1
 
-          # 2) Engine cross-kompilieren
+          echo "=== Dependencies bauen (makelibs) ==="
+          time make makelibs FTE_TARGET=linux_arm64
+
+          echo "=== Engine cross-kompilieren ==="
           time make m-rel \
             FTE_TARGET=linux_arm64 \
             FTE_CONFIG=nzportable \
             USE_SDL=2 \
             NO_X11=1 \
-            X11QUAKE= \
             CC="${CC}" \
             CXX="${CXX}" \
             CPUOPTIMIZATIONS="${OPT_FLAGS}" \
             -j"$(nproc)"
 
-      - name: Locate binary
+      # ─────────────────────────────────────────────────────────────
+      # Binary lokalisieren + Architektur verifizieren
+      # ─────────────────────────────────────────────────────────────
+      - name: Locate binary and verify architecture
         if: success()
         run: |
+          set -euo pipefail
+          echo "=== release/ Inhalt ==="
+          find engine/release -type f -executable 2>/dev/null | head -40 || true
+
           BIN=$(find engine/release -type f \( -name "nzp.aarch64" -o -name "nzp-sdl" -o -name "fteqw*" \) 2>/dev/null | head -1)
-          [ -n "$BIN" ] || { echo "Binary nicht gefunden"; exit 1; }
-          file "$BIN"   # muss "ARM aarch64" zeigen
+          if [ -z "$BIN" ]; then
+            echo "FEHLER: Binary nicht gefunden!"
+            find engine/release -type f | head -40
+            exit 1
+          fi
+
+          echo "=== Binary-Info ==="
+          file "$BIN"
           ls -la "$BIN"
+
+          # Sicherstellen, dass es wirklich ARM64 ist
+          if ! file "$BIN" | grep -q "ARM aarch64"; then
+            echo "FEHLER: Binary ist NICHT ARM64!"
+            exit 1
+          fi
+          echo "OK: Binary ist ARM64"
+
           echo "BINARY_PATH=$BIN" >> "$GITHUB_ENV"
 
+      # ─────────────────────────────────────────────────────────────
+      # Artifact hochladen
+      # ─────────────────────────────────────────────────────────────
       - name: Upload artifact
         if: success()
         uses: actions/upload-artifact@v4
@@ -95,3 +137,4 @@ jobs:
             engine/release/**/nzp-sdl
             engine/release/**/fteqw*
           if-no-files-found: error
+          retention-days: 30
