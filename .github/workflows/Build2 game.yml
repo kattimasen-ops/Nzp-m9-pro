@@ -54,46 +54,16 @@ jobs:
           echo "=== Gepatchte Funktion ==="
           grep -A3 "PR_SSQC_CheckHeaderCrc" "$PR_CMDS" | head -20
 
-      - name: Configure Environment and Patch Makefile for EGL Backend
+      - name: Build Engine with EGL Backend
         run: |
           set -euo pipefail
           cd engine
 
-          # --- 1. Patch Makefile to force-include gl_videgl.o in MCL_OBJS ---
-          # The previous linker error showed 'eglrendererinfo' and 'GLVID_*' were missing.
-          # These are provided by gl_videgl.c. We append it to MCL_OBJS.
-          if ! grep -q "gl_videgl.o" Makefile; then
-            echo "Füge gl_videgl.o zu MCL_OBJS hinzu..."
-            # Check if MCL_OBJS exists and append. Otherwise, append to GLCL_OBJS as fallback.
-            if grep -q "^MCL_OBJS=" Makefile; then
-              sed -i '/^MCL_OBJS=/s/$/ gl_videgl.o/' Makefile
-            elif grep -q "^GLCL_OBJS=" Makefile; then
-              sed -i '/^GLCL_OBJS=/s/$/ gl_videgl.o/' Makefile
-            else
-              echo "WARNUNG: MCL_OBJS oder GLCL_OBJS nicht gefunden. Versuche globales OBJS."
-              # Fallback: Try appending to a generic OBJS variable if it exists
-              if grep -q "^OBJS=" Makefile; then
-                sed -i '/^OBJS=/s/$/ gl_videgl.o/' Makefile
-              fi
-            fi
-          else
-            echo "gl_videgl.o ist bereits in der Makefile referenziert."
-          fi
-
-          # Optional: Ensure -DUSE_EGL is defined for the EGL backend
-          if ! grep -q "USE_EGL" Makefile; then
-            echo "Füge -DUSE_EGL zu GL_CFLAGS hinzu..."
-            # Find the GL_CFLAGS line and append -DUSE_EGL
-            if grep -q "^GL_CFLAGS" Makefile; then
-              sed -i '/^GL_CFLAGS/s/$/ -DUSE_EGL/' Makefile
-            fi
-          fi
-
-          # --- 2. Set Compiler and Optimization Flags ---
-          # WICHTIG: -DNO_X11 bleibt, aber -DUSE_EGL wird hinzugefügt.
+          # --- Compiler und Umgebung ---
+          # WICHTIG: -DNO_X11 bleibt, aber -DUSE_EGL wird NICHT mehr hier gesetzt.
           # ALSA wird NICHT deaktiviert (-DNO_ALSA fehlt absichtlich).
           export OPT_FLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 \
-            -DNO_X11 -DUSE_EGL \
+            -DNO_X11 \
             -fno-strict-aliasing -fno-finite-math-only \
             -fomit-frame-pointer -funroll-loops -pipe"
 
@@ -101,19 +71,20 @@ jobs:
           export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
           export PKG_CONFIG_SYSROOT_DIR=/
 
-          # --- 3. Build Libraries (makelibs) ---
-          # This MUST succeed (no '|| true') for ARM64 static libs to be present.
+          # --- ARM64 static libraries build (MUSS erfolgreich sein) ---
           make makelibs FTE_TARGET=linux_arm64
 
-          # --- 4. Build the Engine ---
-          # Note: We still pass NO_X11=1 as a make variable, but the -DUSE_EGL flag
-          # and the Makefile patch should ensure the EGL backend is compiled.
+          # --- Engine build ---
+          # USE_EGL=1 ist der entscheidende Makefile-Schalter:
+          #  - Fügt gl_videgl.o zu MCL_OBJS hinzu (Linkliste)
+          #  - Setzt intern -DUSE_EGL und ggf. -DEGLQUAKE in CFLAGS
           make m-rel \
             FTE_TARGET=linux_arm64 \
             FTE_CONFIG=nzportable \
             CC=aarch64-linux-gnu-gcc \
             CPUOPTIMIZATIONS="${OPT_FLAGS}" \
             USE_SDL=2 \
+            USE_EGL=1 \
             NO_X11=1 \
             NO_WAYLAND=1 \
             NO_VULKAN=1 \
@@ -129,7 +100,6 @@ jobs:
             ls -lh "$BINARY"
           else
             echo "❌ Build failed: Binary not found at $BINARY"
-            # List release directory to help debugging
             ls -la engine/release/ || true
             exit 1
           fi
@@ -139,4 +109,4 @@ jobs:
         with:
           name: nzportable-arm64-binary
           path: engine/release/nzportablearm64.db
-          if-no-files-found: error
+          if-no-files-found: error 
