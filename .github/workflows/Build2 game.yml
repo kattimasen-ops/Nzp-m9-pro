@@ -1,48 +1,23 @@
-name: Build NZP M9 Pro (ARM64) with Patches
+name: Build NZP PortMaster Engine (RK3326 / ArkOS)
 
 on:
   push:
     branches: [ main, master ]
   workflow_dispatch:
   schedule:
-    # Täglich 03:00 UTC – baut automatisch mit der neuesten Source
     - cron: '0 3 * * *'
 
 jobs:
   build-portmaster-package:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout FTEQW Engine
+      - name: Checkout nzp-team/fteqw Engine Repository
         uses: actions/checkout@v4
         with:
           repository: nzp-team/fteqw
           ref: master
           submodules: recursive
           fetch-depth: 0
-
-      - name: Checkout QuakeC Source (NZP)
-        uses: actions/checkout@v4
-        with:
-          repository: kattimasen-ops/Nzp-m9-pro
-          path: quakec-src
-          ref: main
-          fetch-depth: 1
-
-      - name: Install Cross-Compilation Dependencies (ARM64)
-        run: |
-          set -euo pipefail
-          sudo dpkg --add-architecture arm64
-          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -cs) main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/arm64-ports.list
-          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -cs)-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64-ports.list
-
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            make pkg-config \
-            libgl-dev:arm64 libgles2-mesa-dev:arm64 libegl1-mesa-dev:arm64 \
-            libglx-dev:arm64 libgl1-mesa-dev:arm64 \
-            libpng-dev:arm64 libjpeg-dev:arm64 zlib1g-dev:arm64 \
-            libasound2-dev:arm64 libpulse-dev:arm64
 
       - name: Patch PR_SSQC_CheckHeaderCrc (Bypass CRC Check)
         run: |
@@ -53,86 +28,85 @@ jobs:
             exit 1
           fi
           echo "Patche $PR_CMDS"
+          # Deaktiviert die CRC-Prüfung: Die Funktion gibt sofort true zurück,
+          # bevor der eigentliche Header-Check ausgeführt wird.
           sed -i '/pbool PDECL PR_SSQC_CheckHeaderCrc/{n;s/{/{\n    return true; \/\/ NZP-M9: CRC check disabled/;}' "$PR_CMDS"
           echo "=== Gepatchte Funktion ==="
           grep -A3 "PR_SSQC_CheckHeaderCrc" "$PR_CMDS" | head -20
 
-      - name: Patch Makefile for EGL Support
+      - name: Set up QEMU (ARM64 Emulation)
+        uses: docker/setup-qemu-action@v3
+
+      - name: Compile FTE Engine in ARM64 Container
+        run: |
+          docker run --rm --platform linux/arm64 -v "${{ github.workspace }}:/workspace" -w /workspace \
+            arm64v8/ubuntu:20.04 bash -c '
+              set -euo pipefail
+              export DEBIAN_FRONTEND=noninteractive
+
+              apt-get update && apt-get install -y --no-install-recommends \
+                build-essential make git curl wget ca-certificates pkg-config perl \
+                libsdl2-dev libgles2-mesa-dev libegl1-mesa-dev libasound2-dev zlib1g-dev
+
+              git config --global --add safe.directory /workspace
+              git config --global --add safe.directory "*"
+
+              if [ -f "engine/Makefile" ]; then
+                echo "Located Makefile in engine/ directory."
+                cd engine
+              elif [ -f "Makefile" ]; then
+                echo "Located Makefile in root directory."
+              else
+                MAKEFILE_PATH=$(find . -maxdepth 4 \( -iname "makefile" -o -iname "GNUmakefile" \) | head -n 1)
+                if [ -n "${MAKEFILE_PATH}" ]; then
+                  BUILD_DIR=$(dirname "${MAKEFILE_PATH}")
+                  echo "Located Makefile at: ${MAKEFILE_PATH} (Directory: ${BUILD_DIR})"
+                  cd "${BUILD_DIR}"
+                else
+                  echo "Error: Could not locate Makefile!"
+                  ls -la
+                  exit 1
+                fi
+              fi
+
+              OPT_FLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 -funsafe-math-optimizations -fno-math-errno -fno-trapping-math -fomit-frame-pointer -funroll-loops -pipe"
+
+              # WICHTIG: makelibs MUSS erfolgreich sein (kein || true),
+              # sonst fehlen die ARM64-Bibliotheken und der Linker schlägt fehl.
+              make makelibs FTE_TARGET=linux_arm64
+              make m-rel \
+                FTE_TARGET=linux_arm64 \
+                FTE_CONFIG=nzportable \
+                USE_SDL=2 \
+                NO_X11=1 \
+                NO_WAYLAND=1 \
+                NO_VULKAN=1 \
+                CPUOPTIMIZATIONS="${OPT_FLAGS}" \
+                -j"$(nproc)"
+            '
+
+      - name: Stage Complete PortMaster Artifact
         run: |
           set -euo pipefail
-          cd engine
+          mkdir -p dist/nzp
 
-          # 1) -DUSE_EGL an GL_CFLAGS anhängen (die tatsächliche Variable der Makefile).
-          #    Aktiviert den EGL-Code in gl_vidsdl.c, das die fehlenden
-          #    GLVID_*-Symbole bereitstellt.
-          if ! grep -q 'GL_CFLAGS.*DUSE_EGL' Makefile; then
-            # Es gibt mehrere Zuweisungen für GL_CFLAGS (z.B. +=).
-            # Wir hängen -DUSE_EGL an jede Zeile an, die mit GL_CFLAGS beginnt.
-            sed -i '/^GL_CFLAGS/s/$/ -DUSE_EGL/' Makefile
-            echo "GL_CFLAGS um -DUSE_EGL erweitert (alle Vorkommen)."
-          else
-            echo "GL_CFLAGS enthält bereits -DUSE_EGL."
+          BIN=$(find . -maxdepth 5 -type f -executable \
+                \( -iname "*arm64*" -o -iname "*aarch64*" -o -iname "fteqw*" -o -iname "*nzportable*" \) \
+                ! -iname "*.sh" | head -n 1)
+
+          if [ -z "${BIN}" ]; then
+            echo "Error: Engine binary not found after compilation!" && exit 1
           fi
 
-          # 2) -lEGL an CLIENTLDDEPS anhängen (Linker-Flags für den Client).
-          #    Stellt sicher, dass die EGL-Bibliothek beim Linken verfügbar ist.
-          if ! grep -q 'CLIENTLDDEPS=.*-lEGL' Makefile; then
-            sed -i '/^CLIENTLDDEPS=/s/$/ -lEGL/' Makefile
-            echo "-lEGL zu CLIENTLDDEPS hinzugefügt."
-          else
-            echo "CLIENTLDDEPS enthält bereits -lEGL."
-          fi
+          cp "${BIN}" dist/nzp/nzp.aarch64
+          chmod +x dist/nzp/nzp.aarch64
 
-          # 3) Kontrolle: Zeigt die relevanten Zeilen
-          echo "=== GL_CFLAGS (alle Vorkommen) ==="
-          grep '^GL_CFLAGS' Makefile
-          echo "=== CLIENTLDDEPS ==="
-          grep '^CLIENTLDDEPS=' Makefile | head -1
+          echo "Final Artifact Contents:"
+          ls -la dist/nzp/
 
-      - name: Build Engine
-        run: |
-          set -euo pipefail
-          cd engine
-
-          export OPT_FLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 \
-            -DNO_X11 \
-            -fno-strict-aliasing -fno-finite-math-only \
-            -fomit-frame-pointer -funroll-loops -pipe"
-
-          export CC=aarch64-linux-gnu-gcc
-          export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
-          export PKG_CONFIG_SYSROOT_DIR=/
-
-          make makelibs FTE_TARGET=linux_arm64
-
-          make m-rel \
-            FTE_TARGET=linux_arm64 \
-            FTE_CONFIG=nzportable \
-            CC=aarch64-linux-gnu-gcc \
-            CPUOPTIMIZATIONS="${OPT_FLAGS}" \
-            USE_SDL=2 \
-            NO_X11=1 \
-            NO_WAYLAND=1 \
-            NO_VULKAN=1 \
-            -j"$(nproc)"
-
-      - name: Verify Output Binary
-        run: |
-          set -euo pipefail
-          BINARY="engine/release/nzportablearm64.db"
-          if [ -f "$BINARY" ]; then
-            echo "✅ Build successful: $BINARY"
-            file "$BINARY"
-            ls -lh "$BINARY"
-          else
-            echo "❌ Build failed: Binary not found at $BINARY"
-            ls -la engine/release/ || true
-            exit 1
-          fi
-
-      - name: Upload Artifact
+      - name: Upload PortMaster Ready Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nzportable-arm64-binary
-          path: engine/release/nzportablearm64.db
+          name: nzp-m9pro-portmaster-complete
+          path: dist/nzp/
           if-no-files-found: error
