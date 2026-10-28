@@ -1,4 +1,4 @@
-name: Build NZP Engine (ARM64 Cross-Compile, kein QEMU)
+name: Build NZP Engine (ARM64 Cross-Compile, GLIBC 2.31)
 
 on:
   workflow_dispatch:
@@ -27,134 +27,93 @@ jobs:
           sed -i '/pbool PDECL PR_SSQC_CheckHeaderCrc/{n;s/{/{\n    return true; \/\/ NZP-M9: CRC check disabled/;}' "$PR_CMDS"
           grep -A3 "PR_SSQC_CheckHeaderCrc" "$PR_CMDS" | head -10
 
-      - name: Install ARM64 cross toolchain & ALL X11 headers
+      - name: Build in Ubuntu 20.04 container (GLIBC 2.31)
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            binutils-aarch64-linux-gnu \
-            build-essential make git pkg-config \
-            libdrm-dev libgbm-dev libgles2-mesa-dev libegl1-mesa-dev \
-            libasound2-dev zlib1g-dev libpng-dev libjpeg-dev \
-            libx11-dev libxext-dev libxss-dev libxcb1-dev \
-            libxrandr-dev libxi-dev libxrender-dev libxtst-dev \
-            libxt-dev libxfixes-dev libxcursor-dev libxinerama-dev
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace \
+            ubuntu:20.04 bash -c '
+              set -euo pipefail
+              export DEBIAN_FRONTEND=noninteractive
 
-      - name: Verify X11 headers present
-        run: |
-          set -euo pipefail
-          MISSING=""
-          for h in \
-            X11/extensions/Xrandr.h \
-            X11/extensions/XInput2.h \
-            X11/extensions/Xrender.h \
-            X11/extensions/XTest.h \
-            X11/extensions/Xfixes.h \
-            X11/Xcursor/Xcursor.h \
-            X11/extensions/Xinerama.h \
-            X11/Xlib.h; do
-            if [ ! -f "/usr/include/$h" ]; then
-              echo "FEHLT: /usr/include/$h"
-              MISSING="$MISSING $h"
-            else
-              echo "OK: /usr/include/$h"
-            fi
-          done
-          if [ -n "$MISSING" ]; then
-            echo "FEHLER: Fehlende Header:$MISSING"
-            exit 1
-          fi
+              apt-get update
+              apt-get install -y --no-install-recommends \
+                gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+                binutils-aarch64-linux-gnu \
+                build-essential make git pkg-config wget ca-certificates \
+                libdrm-dev libgbm-dev libgles2-mesa-dev libegl1-mesa-dev \
+                libasound2-dev zlib1g-dev libpng-dev libjpeg-dev \
+                libx11-dev libxext-dev libxss-dev libxcb1-dev \
+                libxrandr-dev libxi-dev libxrender-dev libxtst-dev \
+                libxt-dev libxfixes-dev libxcursor-dev libxinerama-dev
 
-      - name: Cache ARM64 deps
-        uses: actions/cache@v4
-        with:
-          path: engine/libs-aarch64-linux-gnu
-          key: cross-deps-aarch64-v2
-          restore-keys: cross-deps-aarch64-
+              cd /workspace/engine
 
-      - name: Build ARM64 (cross-compile, kein QEMU)
-        env:
-          CC: aarch64-linux-gnu-gcc
-          CXX: aarch64-linux-gnu-g++
-          AR: aarch64-linux-gnu-ar
-          RANLIB: aarch64-linux-gnu-ranlib
-          STRIP: aarch64-linux-gnu-strip
-          PKG_CONFIG_LIBDIR: ${{ github.workspace }}/engine/libs-aarch64-linux-gnu
-          PKG_CONFIG_SYSROOT_DIR: ${{ github.workspace }}/engine/libs-aarch64-linux-gnu
-        run: |
-          set -euo pipefail
-          cd engine
+              export CC=aarch64-linux-gnu-gcc
+              export CXX=aarch64-linux-gnu-g++
+              export AR=aarch64-linux-gnu-ar
+              export RANLIB=aarch64-linux-gnu-ranlib
+              export STRIP=aarch64-linux-gnu-strip
+              export PKG_CONFIG_LIBDIR=/workspace/engine/libs-aarch64-linux-gnu
+              export PKG_CONFIG_SYSROOT_DIR=/workspace/engine/libs-aarch64-linux-gnu
 
-          OPT_FLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 -funsafe-math-optimizations -fno-math-errno -fno-trapping-math -fomit-frame-pointer -funroll-loops -pipe"
+              OPT_FLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 -funsafe-math-optimizations -fno-math-errno -fno-trapping-math -fomit-frame-pointer -funroll-loops -pipe"
 
-          echo "=== Toolchain-Check ==="
-          aarch64-linux-gnu-gcc --version | head -1
+              echo "=== Toolchain-Check ==="
+              aarch64-linux-gnu-gcc --version | head -1
+              ldd --version | head -1
 
-          echo "=== Dependencies bauen (makelibs) ==="
-          time make makelibs FTE_TARGET=linux_arm64
+              echo "=== Dependencies bauen (makelibs) ==="
+              time make makelibs FTE_TARGET=linux_arm64
 
-          echo "=== Engine cross-kompilieren ==="
-          time make m-rel \
-            FTE_TARGET=linux_arm64 \
-            FTE_CONFIG=nzportable \
-            USE_SDL=2 \
-            NO_X11=1 \
-            CC="${CC}" \
-            CXX="${CXX}" \
-            CPUOPTIMIZATIONS="${OPT_FLAGS}" \
-            -j"$(nproc)"
+              echo "=== Engine cross-kompilieren ==="
+              time make m-rel \
+                FTE_TARGET=linux_arm64 \
+                FTE_CONFIG=nzportable \
+                USE_SDL=2 \
+                NO_X11=1 \
+                CC="${CC}" \
+                CXX="${CXX}" \
+                CPUOPTIMIZATIONS="${OPT_FLAGS}" \
+                -j"$(nproc)"
+            '
 
       - name: Locate binary and verify architecture
         if: success()
         run: |
           set -euo pipefail
-
-          # FTEQW erzeugt nzportablearm64 (+ .db Debug-Symbole).
-          # Ältere Muster bleiben als Fallback drin.
           BIN=$(find engine/release -maxdepth 1 -type f \
             \( -name "nzportablearm64" \
                -o -name "nzportable*" \
                -o -name "nzp.aarch64" \
-               -o -name "nzp-sdl" \
-               -o -name "fteqw*" \) 2>/dev/null \
+               -o -name "nzp-sdl" \) 2>/dev/null \
             | grep -v '\.db$' | head -1)
 
           if [ -z "$BIN" ]; then
             echo "FEHLER: Binary nicht gefunden!"
-            echo "--- engine/release/ Inhalt (Top-Level) ---"
             find engine/release -maxdepth 1 -type f
             exit 1
           fi
 
-          echo "=== Binary-Info ==="
           file "$BIN"
-          ls -la "$BIN"
-
           if ! file "$BIN" | grep -q "ARM aarch64"; then
             echo "FEHLER: Binary ist NICHT ARM64!"
             exit 1
           fi
           echo "OK: Binary ist ARM64"
 
-          # Debug-Symbole mit auflisten (falls vorhanden)
-          DB="${BIN}.db"
-          if [ -f "$DB" ]; then
-            echo "Debug-Symbole:"
-            ls -la "$DB"
-          fi
-
-          echo "BINARY_PATH=$BIN" >> "$GITHUB_ENV"
+          echo "=== GLIBC-Version der Binary ==="
+          readelf --version-info "$BIN" 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sort -u || true
 
       - name: Upload artifact
         if: success()
         uses: actions/upload-artifact@v4
         with:
-          name: nzp-aarch64-cross
+          name: nzp-aarch64-glibc231
           path: |
             engine/release/nzportablearm64
             engine/release/nzportablearm64.db
             engine/release/nzp.aarch64
             engine/release/nzp-sdl
-            engine/release/fteqw*
           if-no-files-found: error
           retention-days: 30
