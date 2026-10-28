@@ -1,4 +1,4 @@
-name: Build NZP PortMaster Engine (RK3326 / ArkOS)
+name: Build NZP PortMaster Engine & QuakeC (RK3326 / ArkOS)
 
 on:
   push:
@@ -9,6 +9,9 @@ jobs:
   build-portmaster-package:
     runs-on: ubuntu-latest
     steps:
+      # ─────────────────────────────────────────────
+      # 1. Engine-Quellcode auschecken
+      # ─────────────────────────────────────────────
       - name: Checkout nzp-team/fteqw Engine Repository
         uses: actions/checkout@v4
         with:
@@ -17,22 +20,36 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Install Cross-Compiler Toolchain & arm64 GL Headers
+      # ─────────────────────────────────────────────
+      # 2. QuakeC-Quellcode (deinen Fork) auschecken
+      # ─────────────────────────────────────────────
+      - name: Checkout QuakeC Repository
+        uses: actions/checkout@v4
+        with:
+          path: quakec-src
+
+      # ─────────────────────────────────────────────
+      # 3. Cross-Compiler & arm64-GL-Header installieren
+      #    (behebt den pkg-config- und GL/gl.h-Fehler)
+      # ─────────────────────────────────────────────
+      - name: Install Cross-Compiler & arm64 GL Headers
         run: |
           set -euo pipefail
           sudo dpkg --add-architecture arm64
-          
-          # arm64-Ports-Quellen hinzufügen (falls Standard-Repos die Pakete nicht bieten)
+
           echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -cs) main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/arm64-ports.list
           echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $(lsb_release -cs)-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/arm64-ports.list
-          
+
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            make pkg-config pkg-config-aarch64-linux-gnu \
+            make pkg-config \
             libgl-dev:arm64 libgles2-mesa-dev:arm64 libegl1-mesa-dev:arm64 \
             libglx-dev:arm64 libgl1-mesa-dev:arm64
 
+      # ─────────────────────────────────────────────
+      # 4. Engine patchen (CRC-Prüfung für progs.dat deaktivieren)
+      # ─────────────────────────────────────────────
       - name: Patch Engine (disable progs.dat CRC check)
         run: |
           set -euo pipefail
@@ -46,9 +63,13 @@ jobs:
           echo "=== Gepatchte Funktion ==="
           grep -A3 "PR_SSQC_CheckHeaderCrc" "$PR_CMDS" | head -20
 
+      # ─────────────────────────────────────────────
+      # 5. Engine kompilieren (Cortex-A35-Optimierungen)
+      # ─────────────────────────────────────────────
       - name: Compile FTE Engine (Cross-Compile for aarch64)
         run: |
           set -euo pipefail
+
           if [ -f "engine/Makefile" ]; then
             cd engine
           else
@@ -80,26 +101,94 @@ jobs:
             NO_VULKAN=1 \
             -j"$(nproc)"
 
-      - name: Stage Complete PortMaster Artifact
+      # ─────────────────────────────────────────────
+      # 6. QuakeC kompilieren (progs.dat, csprogs.dat, menu.dat)
+      # ─────────────────────────────────────────────
+      - name: Install Python Dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          python3 -m pip install pandas fastcrc colorama
+
+      - name: Apply QuakeC Patches
+        run: |
+          set -euo pipefail
+          cd quakec-src
+          python3 scripts/apply_nzp_m9_patches.py | tee patch_output.log
+
+      - name: Generate Hash Table
+        run: |
+          set -euo pipefail
+          cd quakec-src
+          mkdir -p source/server
+          python3 bin/qc_hash_generator.py \
+            -i tools/asset_conversion_table.csv \
+            -o source/server/hash_table.qc
+
+      - name: Compile QuakeC (csprogs, menu, progs)
+        run: |
+          set -euo pipefail
+          cd quakec-src
+          chmod +x bin/fteqcc-cli-lin
+          mkdir -p build/fte build/standard
+
+          echo "=== Client (CSQC) ==="
+          bin/fteqcc-cli-lin -O3 -DFTE -Ono-compound_jumps -Wall -srcfile progs/csqc.src
+
+          echo "=== Menu ==="
+          bin/fteqcc-cli-lin -O3 -DFTE -Ono-compound_jumps -Wall -srcfile progs/menu.src
+
+          echo "=== Server (SSQC / progs.dat) ==="
+          bin/fteqcc-cli-lin -O3 -DFTE -Ono-compound_jumps -Wall -srcfile progs/ssqc.src
+
+          cp build/fte/csprogs.dat csprogs.dat
+          cp build/fte/menu.dat menu.dat
+          cp build/standard/progs.dat progs.dat
+
+          echo "=== Ergebnis ==="
+          ls -la csprogs.dat menu.dat progs.dat
+
+      # ─────────────────────────────────────────────
+      # 7. Artefakte sammeln und hochladen
+      # ─────────────────────────────────────────────
+      - name: Stage Artifacts
         run: |
           set -euo pipefail
           mkdir -p dist/nzp
+
           BIN=$(find . -maxdepth 6 -type f -executable \
                 \( -iname "*arm64*" -o -iname "*aarch64*" -o -iname "fteqw*" -o -iname "*nzportable*" \) \
                 ! -iname "*.sh" ! -iname "*.py" | head -n 1)
           if [ -z "${BIN}" ]; then
-            echo "Error: Engine binary not found after compilation!"
+            echo "FEHLER: Engine-Binary nicht gefunden!"
             exit 1
           fi
+
           cp "${BIN}" dist/nzp/nzp.aarch64
           chmod +x dist/nzp/nzp.aarch64
-          echo "Final Artifact Contents:"
-          ls -la dist/nzp/
-          file dist/nzp/nzp.aarch64
 
-      - name: Upload PortMaster Ready Artifact
+          cp quakec-src/csprogs.dat dist/nzp/
+          cp quakec-src/menu.dat    dist/nzp/
+          cp quakec-src/progs.dat   dist/nzp/
+
+          if [ -d "quakec-src/assets/models/ai" ]; then
+            cp quakec-src/assets/models/ai/*.md3 dist/nzp/ 2>/dev/null || true
+          fi
+
+          echo "=== Artifact Contents ==="
+          ls -la dist/nzp/
+
+      - name: Upload Complete Package
         uses: actions/upload-artifact@v4
         with:
-          name: nzp-m9pro-portmaster-complete
+          name: nzp-m9pro-complete
           path: dist/nzp/
+          if-no-files-found: error
+
+      - name: Upload Patched Sources
+        uses: actions/upload-artifact@v4
+        with:
+          name: nzp-patched-source
+          path: |
+            quakec-src/source/
+            quakec-src/patch_output.log
           if-no-files-found: error
