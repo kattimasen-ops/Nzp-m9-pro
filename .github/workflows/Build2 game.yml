@@ -1,4 +1,4 @@
-name: Build NZP Engine (RK3326 ARM64, KMSDRM, SDL Video)
+name: Build NZP Engine (RK3326 ARM64, KMSDRM, SDL2 linked)
 
 on:
   workflow_dispatch:
@@ -21,37 +21,6 @@ jobs:
           PR_CMDS=$(find . -path "*/engine/server/pr_cmds.c" | head -n 1)
           [ -n "$PR_CMDS" ] || { echo "FEHLER: pr_cmds.c nicht gefunden"; exit 1; }
           sed -i '/pbool PDECL PR_SSQC_CheckHeaderCrc/{n;s/{/{\n    return true; \/\/ NZP-M9: CRC check disabled/;}' "$PR_CMDS"
-          grep -A3 "PR_SSQC_CheckHeaderCrc" "$PR_CMDS" | head -10
-
-      - name: Patch FTEQW sources for NO_X11 + SDL backend
-        run: |
-          set -euo pipefail
-
-          # ── 1. gl_vidlinuxglx.c: SDL-Video + EGL-Rendererinfo im NO_X11-Zweig ──
-          VID_FILE=$(find . -path "*/engine/gl/gl_vidlinuxglx.c" | head -n 1)
-          [ -n "$VID_FILE" ] || { echo "FEHLER: gl_vidlinuxglx.c nicht gefunden"; exit 1; }
-
-          if ! grep -q "NZP-M9-USE-SDL-VIDEO" "$VID_FILE"; then
-            sed -i '1i /* NZP-M9-USE-SDL-VIDEO */\n#ifdef NO_X11\n#include "gl_videgl.h"\n#include "gl_vidsdl.c"\n#else' "$VID_FILE"
-            echo '#endif' >> "$VID_FILE"
-            echo "OK: gl_vidlinuxglx.c patched (NO_X11 -> gl_videgl.h + gl_vidsdl.c)"
-          else
-            echo "OK: gl_vidlinuxglx.c Patch bereits vorhanden."
-          fi
-
-          # ── 2. in_generic.c: SDL-Eingabeschicht einbinden ──
-          IN_FILE=$(find . -path "*/engine/client/in_generic.c" | head -n 1)
-          [ -n "$IN_FILE" ] || { echo "FEHLER: in_generic.c nicht gefunden"; exit 1; }
-
-          if ! grep -q "NZP-M9-USE-SDL-INPUT" "$IN_FILE"; then
-            sed -i '1i /* NZP-M9-USE-SDL-INPUT */\n#ifdef NO_X11\n#include "in_sdl.c"\n#endif' "$IN_FILE"
-            echo "OK: in_generic.c patched (NO_X11 -> in_sdl.c)"
-          else
-            echo "OK: in_generic.c Patch bereits vorhanden."
-          fi
-
-          head -6 "$VID_FILE"
-          head -4 "$IN_FILE"
 
       - name: Stage SDL2 KMSDRM patch script on host
         run: |
@@ -139,6 +108,7 @@ jobs:
                 libasound2-dev:arm64 zlib1g-dev:arm64 \
                 libpng-dev:arm64 libjpeg-dev:arm64
 
+              # ── SDL2-Header fuer den Compiler bereitstellen ──
               export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
               export PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
               export PKG_CONFIG_SYSROOT_DIR=/
@@ -171,10 +141,16 @@ jobs:
               export RANLIB=aarch64-linux-gnu-ranlib
               export STRIP=aarch64-linux-gnu-strip
 
+              # ── Entscheidend: PKGCONFIG auf das Host-pkg-config setzen ──
+              # Die Makefile erwartet fuer linux_arm64 standardmaessig
+              # aarch64-linux-gnu-pkg-config. Existiert das nicht, setzt sie
+              # PKGCONFIG auf /bin/false und alle SDL2-Linker-Flags fallen weg.
+              # Genau das erzeugt die undefined references zu SDL_*.
+              export PKGCONFIG=pkg-config
+
               OPT_FLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 \
                 -funsafe-math-optimizations -fno-math-errno \
-                -fno-trapping-math -fomit-frame-pointer -funroll-loops -pipe \
-                -DNO_X11"
+                -fno-trapping-math -fomit-frame-pointer -funroll-loops -pipe"
 
               mkdir -p libs-aarch64-linux-gnu
               cp -r /usr/local/include/SDL2/* libs-aarch64-linux-gnu/
@@ -184,14 +160,14 @@ jobs:
               echo "=== Dependencies bauen (makelibs) ==="
               time make makelibs FTE_TARGET=linux_arm64
 
-              echo "=== Engine cross-kompilieren (RK3326, KMSDRM, SDL Video+Input) ==="
+              echo "=== Engine cross-kompilieren (RK3326, KMSDRM, SDL2) ==="
               time make m-rel \
                 FTE_TARGET=linux_arm64 \
                 FTE_CONFIG=nzportable \
                 USE_SDL=2 \
-                NO_X11=1 \
                 CC="${CC}" \
                 CXX="${CXX}" \
+                PKGCONFIG="${PKGCONFIG}" \
                 CPUOPTIMIZATIONS="${OPT_FLAGS}" \
                 -j"$(nproc)"
 
@@ -202,10 +178,6 @@ jobs:
 
               echo "=== Patch-Marker in libSDL2-2.0.so.0 ==="
               strings libSDL2-2.0.so.0 | grep "NZP-M9" || echo "WARNUNG: Patch-Marker nicht gefunden!"
-
-              echo "=== Video-/Input-Symbole in der Binary ==="
-              BIN=$(find /workspace/engine/release -maxdepth 1 -type f -name "nzportable*" | head -1)
-              strings "$BIN" 2>/dev/null | grep -E "GLVID_Init|INS_Init|eglrendererinfo" | head -5 || true
             '
 
       - name: Verify Binary and SDL2
