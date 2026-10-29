@@ -29,17 +29,21 @@ jobs:
           sed -i '/pbool PDECL PR_SSQC_CheckHeaderCrc/{n;s/{/{\n    return true; \/\/ NZP-M9: CRC check disabled/;}' "$PR_CMDS"
           grep -A2 -n "PR_SSQC_CheckHeaderCrc" "$PR_CMDS" | head -5 || true
 
-      - name: Patch engine/Makefile (gl_vidsdl.o + in_sdl.o/sys_sdl.o)
+      - name: Patch engine/Makefile (gl_vidsdl.o + in_sdl.o/sys_sdl.o + gl_videgl.o)
         run: |
           set -euo pipefail
           MAKEFILE=$(find . -path "*/engine/Makefile" | head -n 1)
           [ -n "$MAKEFILE" ] || { echo "FEHLER: engine/Makefile nicht gefunden"; exit 1; }
 
-          # gl_vidlinuxglx.o -> gl_vidsdl.o (SDL-Video statt X11-Stub)
+          # gl_vidlinuxglx.o -> gl_vidsdl.o
           sed -i 's/gl_vidlinuxglx\.o/gl_vidsdl.o/g' "$MAKEFILE"
 
-          # in_sdl.o / sys_sdl.o direkt nach gl_vidsdl.o sicherstellen
-          grep -q 'gl_vidsdl\.o[^ ]* *\(.* \)\?in_sdl\.o' "$MAKEFILE" || \
+          # gl_videgl.o sicherstellen (eglrendererinfo)
+          grep -q 'gl_videgl\.o' "$MAKEFILE" || \
+            sed -i 's/gl_vidsdl\.o/gl_vidsdl.o gl_videgl.o/' "$MAKEFILE"
+
+          # in_sdl.o / sys_sdl.o nach gl_vidsdl.o
+          grep -q 'gl_vidsdl\.o.*in_sdl\.o' "$MAKEFILE" || \
             sed -i 's/gl_vidsdl\.o/gl_vidsdl.o in_sdl.o sys_sdl.o/' "$MAKEFILE"
 
           echo "=== GLCL_OBJS-Zeile nach Patch ==="
@@ -127,7 +131,6 @@ jobs:
                 libxss-dev:arm64 libxrandr-dev:arm64 \
                 libxi-dev:arm64 libxext-dev:arm64
 
-              # WICHTIG: /usr/local/lib/pkgconfig MUSS enthalten sein (SDL2 landet dort)
               export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
               export PKG_CONFIG_LIBDIR=/usr/local/lib/pkgconfig:/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
               export PKG_CONFIG_SYSROOT_DIR=/
@@ -152,16 +155,15 @@ jobs:
               make -j"$(nproc)"
               make install
 
-              # Sicherheitsnetz: -lSDL2 braucht libSDL2.so, install erzeugt nur libSDL2-2.0.so*
               for f in /usr/local/lib/libSDL2-2.0.so.0 /usr/local/lib/libSDL2-2.0.so; do
                 [ -e "$f" ] && ln -sf "$f" /usr/local/lib/libSDL2.so && break
               done
               ls -la /usr/local/lib/libSDL2*
 
+              echo "=== sdl2-config --libs ==="
+              /usr/local/bin/sdl2-config --libs
               echo "=== pkg-config sdl2 ==="
-              /usr/bin/aarch64-linux-gnu-pkg-config --cflags --libs sdl2 || \
-                pkg-config --cflags --libs sdl2 || \
-                { echo "FEHLER: sdl2.pc nicht auffindbar!"; exit 1; }
+              /usr/bin/aarch64-linux-gnu-pkg-config --cflags --libs sdl2
 
               cd /workspace/engine
 
@@ -172,10 +174,15 @@ jobs:
               export STRIP=aarch64-linux-gnu-strip
               export PKGCONFIG=/usr/bin/aarch64-linux-gnu-pkg-config
 
+              # WICHTIG: FTEQW's Makefile nutzt fuer SDL2 SDLCONFIG/SDLLIBS, nicht PKGCONFIG.
+              export SDLCONFIG=/usr/local/bin/sdl2-config
+              export SDLLIBS="-L/usr/local/lib -lSDL2"
+              export SDLCFLAGS="-I/usr/local/include/SDL2 -D_REENTRANT"
+
               OPT_FLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 \
                 -funsafe-math-optimizations -fno-math-errno \
                 -fno-trapping-math -fomit-frame-pointer -funroll-loops -pipe \
-                -DNO_X11"
+                -DNO_X11 -DUSE_SDL=2"
 
               mkdir -p libs-aarch64-linux-gnu
               cp -r /usr/local/include/SDL2/* libs-aarch64-linux-gnu/
@@ -190,12 +197,16 @@ jobs:
                 FTE_TARGET=linux_arm64 \
                 FTE_CONFIG=nzportable \
                 USE_SDL=2 \
+                SDL=2 \
                 NO_X11=1 \
                 CC="${CC}" \
                 CXX="${CXX}" \
                 PKGCONFIG="${PKGCONFIG}" \
+                SDLCONFIG="${SDLCONFIG}" \
+                SDLLIBS="${SDLLIBS}" \
+                SDLCFLAGS="${SDLCFLAGS}" \
                 CPUOPTIMIZATIONS="${OPT_FLAGS}" \
-                LDFLAGS="-L/usr/local/lib -Wl,-rpath-link,/usr/local/lib" \
+                LDFLAGS="-L/usr/local/lib -Wl,-rpath-link,/usr/local/lib -lSDL2" \
                 -j"$(nproc)"
 
               mkdir -p /workspace/engine/release
