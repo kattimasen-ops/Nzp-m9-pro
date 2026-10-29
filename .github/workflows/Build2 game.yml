@@ -35,14 +35,11 @@ jobs:
           MAKEFILE=$(find . -path "*/engine/Makefile" | head -n 1)
           [ -n "$MAKEFILE" ] || { echo "FEHLER: engine/Makefile nicht gefunden"; exit 1; }
 
-          # gl_vidlinuxglx.o -> gl_vidsdl.o
           sed -i 's/gl_vidlinuxglx\.o/gl_vidsdl.o/g' "$MAKEFILE"
 
-          # gl_videgl.o sicherstellen (eglrendererinfo)
           grep -q 'gl_videgl\.o' "$MAKEFILE" || \
             sed -i 's/gl_vidsdl\.o/gl_vidsdl.o gl_videgl.o/' "$MAKEFILE"
 
-          # in_sdl.o / sys_sdl.o nach gl_vidsdl.o
           grep -q 'gl_vidsdl\.o.*in_sdl\.o' "$MAKEFILE" || \
             sed -i 's/gl_vidsdl\.o/gl_vidsdl.o in_sdl.o sys_sdl.o/' "$MAKEFILE"
 
@@ -155,15 +152,14 @@ jobs:
               make -j"$(nproc)"
               make install
 
-              # Verifikation: Headers muessen da sein, BEVOR wir sie kopieren
               echo "=== /usr/local/include/ ==="
               ls -la /usr/local/include/ || true
-              echo "=== /usr/local/include/SDL2/ (erste 10) ==="
+              echo "=== /usr/local/include/SDL2/ (erste 15) ==="
               ls -la /usr/local/include/SDL2/ | head -15 || true
 
               if [ ! -d /usr/local/include/SDL2 ] || [ -z "$(ls -A /usr/local/include/SDL2 2>/dev/null)" ]; then
                 echo "FATAL: /usr/local/include/SDL2 fehlt oder leer trotz erfolgreichem make install"
-                echo "Quelle /tmp/SDL2-2.30.7/include/ Inhalt:"
+                echo "Quelle /tmp/SDL2-2.30.7/include/:"
                 ls -la /tmp/SDL2-2.30.7/include/ | head -20 || true
                 exit 1
               fi
@@ -187,7 +183,6 @@ jobs:
               export STRIP=aarch64-linux-gnu-strip
               export PKGCONFIG=/usr/bin/aarch64-linux-gnu-pkg-config
 
-              # FTEQW nutzt SDLCONFIG/SDLLIBS, nicht PKGCONFIG, fuer SDL2
               export SDLCONFIG=/usr/local/bin/sdl2-config
               export SDLLIBS="-L/usr/local/lib -lSDL2"
               export SDLCFLAGS="-I/usr/local/include/SDL2 -D_REENTRANT"
@@ -197,10 +192,10 @@ jobs:
                 -fno-trapping-math -fomit-frame-pointer -funroll-loops -pipe \
                 -DNO_X11 -DUSE_SDL=2"
 
-              # Robustes kopieren der SDL2-Header (kein Glob mehr!)
               mkdir -p libs-aarch64-linux-gnu/SDL2
               cp -r /usr/local/include/SDL2/. libs-aarch64-linux-gnu/
               cp -r /usr/local/include/SDL2/. libs-aarch64-linux-gnu/SDL2/
+
               echo "=== Verifikation Header-Kopie ==="
               ls -la libs-aarch64-linux-gnu/SDL.h libs-aarch64-linux-gnu/SDL2/SDL.h
 
@@ -225,4 +220,22 @@ jobs:
                 -j"$(nproc)"
 
               mkdir -p /workspace/engine/release
-              cp -a /usr/local/lib/libSDL2-2.0.so* /works
+              cp -a /usr/local/lib/libSDL2-2.0.so* /workspace/engine/release/ || true
+              cp -a /usr/local/lib/libSDL2.so  /workspace/engine/release/ || true
+              cd /workspace/engine/release
+              ln -sf libSDL2-2.0.so.0 libSDL2-2.0.so || true
+
+              echo "=== Patch-Marker in libSDL2-2.0.so.0 ==="
+              strings libSDL2-2.0.so.0 | grep "NZP-M9" || echo "WARNUNG: Patch-Marker nicht gefunden!"
+            '
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nzportable-rk3326-kmsdrm
+          path: |
+            engine/release/nzportablearm64
+            engine/release/nzportablearm64.db
+            engine/release/libSDL2-2.0.so.0
+            engine/release/libSDL2-2.0.so
+          if-no-files-found: error
