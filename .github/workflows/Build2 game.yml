@@ -88,16 +88,28 @@ jobs:
               set -euo pipefail
               export DEBIAN_FRONTEND=noninteractive
 
+              # ── Multiarch für arm64 aktivieren ──
+              dpkg --add-architecture arm64
               apt-get update
+
+              # ── Host-Tools (amd64) ──
               apt-get install -y --no-install-recommends \
                 gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
                 binutils-aarch64-linux-gnu \
-                build-essential make git pkg-config wget ca-certificates python3 \
-                libdrm-dev libgbm-dev libgles2-mesa-dev libegl1-mesa-dev \
-                libasound2-dev zlib1g-dev libpng-dev libjpeg-dev \
-                libx11-dev libxext-dev libxss-dev libxcb1-dev \
-                libxrandr-dev libxi-dev libxrender-dev libxtst-dev \
-                libxt-dev libxfixes-dev libxcursor-dev libxinerama-dev
+                build-essential make git pkg-config wget ca-certificates python3
+
+              # ── arm64-Entwicklungsbibliotheken ──
+              # Diese Pakete liefern die arm64-Versionen von libdrm.so und libgbm.so
+              apt-get install -y --no-install-recommends \
+                libdrm-dev:arm64 libgbm-dev:arm64 \
+                libgles2-mesa-dev:arm64 libegl1-mesa-dev:arm64 \
+                libasound2-dev:arm64 zlib1g-dev:arm64 \
+                libpng-dev:arm64 libjpeg-dev:arm64
+
+              # ── pkg-config auf arm64-Pfade umbiegen ──
+              export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+              export PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+              export PKG_CONFIG_SYSROOT_DIR=/
 
               # ── 1. SDL2 herunterladen und patchen ──
               SDL2_VER="2.30.7"
@@ -109,6 +121,7 @@ jobs:
 
               # ── 2. SDL2 als Shared Library mit KMSDRM bauen ──
               CFLAGS="-fPIC -Wno-declaration-after-statement" \
+              LDFLAGS="-L/usr/lib/aarch64-linux-gnu" \
               ./configure --prefix=/usr/local \
                 --host=aarch64-linux-gnu \
                 --enable-video-kmsdrm \
@@ -128,9 +141,6 @@ jobs:
               export AR=aarch64-linux-gnu-ar
               export RANLIB=aarch64-linux-gnu-ranlib
               export STRIP=aarch64-linux-gnu-strip
-              export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig
-              export PKG_CONFIG_LIBDIR=/workspace/engine/libs-aarch64-linux-gnu
-              export PKG_CONFIG_SYSROOT_DIR=/workspace/engine/libs-aarch64-linux-gnu
 
               OPT_FLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 -funsafe-math-optimizations -fno-math-errno -fno-trapping-math -fomit-frame-pointer -funroll-loops -pipe"
 
@@ -154,7 +164,6 @@ jobs:
               # ── 4. Gepatchte SDL2-Shared-Libs ins Release-Verzeichnis kopieren ──
               mkdir -p /workspace/engine/release
               cp -a /usr/local/lib/libSDL2-2.0.so* /workspace/engine/release/ || true
-              # Symlink für den dynamischen Linker anlegen
               cd /workspace/engine/release
               ln -sf libSDL2-2.0.so.0 libSDL2-2.0.so || true
 
