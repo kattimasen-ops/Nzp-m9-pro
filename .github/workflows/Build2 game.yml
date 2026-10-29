@@ -56,7 +56,6 @@ jobs:
               print("OK: Window-Flag Patch bereits vorhanden.")
 
           # Fix 2: Pageflip Fallback (disable async flips if driver rejects them).
-          # Broader regex so it matches regardless of the result variable name.
           t = path.read_text()
           marker2 = "NZP-M9-PAGEFLIP-FALLBACK"
           if marker2 not in t:
@@ -184,3 +183,13 @@ jobs:
           echo "OK: Binary ist ARM64"
           echo "=== GLIBC-Version der Binary ==="
           readelf --version-info "$BIN" 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sort -u || true
+
+      - name: Upload Engine Binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: nzportable-arm64-kmsdrm
+          path: |
+            engine/release/nzportablearm64
+            engine/release/nzportablearm64.db
+          if-no-files-found: error
+          retention-days: 14
