@@ -90,6 +90,17 @@ jobs:
 
               # ── Multiarch für arm64 aktivieren ──
               dpkg --add-architecture arm64
+
+              # ── Quellen trennen: amd64 von archive, arm64 von ports ──
+              # Ubuntu hostet arm64-Pakete für focal NICHT auf archive.ubuntu.com.
+              # Ohne diese Trennung liefert apt update 404-Fehler für alle
+              # binary-arm64/Packages-URLs.
+              sed -i "s/^deb /deb [arch=amd64] /" /etc/apt/sources.list
+              cat > /etc/apt/sources.list.d/arm64-ports.list << "EOF"
+deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal main restricted universe multiverse
+deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-updates main restricted universe multiverse
+deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-security main restricted universe multiverse
+EOF
               apt-get update
 
               # ── Host-Tools (amd64) ──
@@ -98,8 +109,7 @@ jobs:
                 binutils-aarch64-linux-gnu \
                 build-essential make git pkg-config wget ca-certificates python3
 
-              # ── arm64-Entwicklungsbibliotheken ──
-              # Diese Pakete liefern die arm64-Versionen von libdrm.so und libgbm.so
+              # ── arm64-Entwicklungsbibliotheken (von ports.ubuntu.com) ──
               apt-get install -y --no-install-recommends \
                 libdrm-dev:arm64 libgbm-dev:arm64 \
                 libgles2-mesa-dev:arm64 libegl1-mesa-dev:arm64 \
