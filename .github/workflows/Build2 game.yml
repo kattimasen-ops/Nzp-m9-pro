@@ -33,32 +33,52 @@ jobs:
           path = pathlib.Path(sys.argv[1] + "/src/video/kmsdrm/SDL_kmsdrmvideo.c")
           t = path.read_text()
 
-          # Fix 1: Force SDL_WINDOW_OPENGL flag for Mali-G31 EGL
+          # Fix 1: Force SDL_WINDOW_OPENGL flag for Mali-G31 EGL.
+          # Insert BEFORE "window->driverdata = windata;" so that all C90
+          # declarations at the top of KMSDRM_CreateWindow stay untouched.
           marker = "NZP-M9-KMSDRM-WINDOW-FLAG"
           if marker not in t:
-              pattern = re.compile(r"(KMSDRM_CreateWindow\s*\([^)]*\)\s*\{)", re.DOTALL)
+              pattern = re.compile(r"(window->driverdata\s*=\s*windata\s*;)", re.DOTALL)
               m = pattern.search(t)
               if m:
-                  insert = "\n    /* " + marker + " */\n    if (!(window->flags & SDL_WINDOW_VULKAN)) {\n        window->flags |= SDL_WINDOW_OPENGL;\n    }\n"
-                  t = t[:m.end()] + insert + t[m.end():]
+                  insert = (
+                      "    /* " + marker + " */\n"
+                      "    if (!(window->flags & SDL_WINDOW_VULKAN)) {\n"
+                      "        window->flags |= SDL_WINDOW_OPENGL;\n"
+                      "    }\n\n"
+                  )
+                  t = t[:m.start()] + insert + t[m.start():]
                   path.write_text(t)
                   print("OK: KMSDRM Window-Flag Patch angewendet.")
               else:
-                  print("WARNUNG: KMSDRM_CreateWindow nicht gefunden.")
+                  print("WARNUNG: 'window->driverdata = windata;' nicht gefunden.")
+          else:
+              print("OK: Window-Flag Patch bereits vorhanden.")
 
-          # Fix 2: Pageflip Fallback (disable async flips if driver rejects them)
+          # Fix 2: Pageflip Fallback (disable async flips if driver rejects them).
+          # Broader regex so it matches regardless of the result variable name.
           t = path.read_text()
           marker2 = "NZP-M9-PAGEFLIP-FALLBACK"
           if marker2 not in t:
-              pattern = re.compile(r"(ret = KMSDRM_drmModePageFlip\([^;]+;)", re.DOTALL)
+              pattern = re.compile(r"(KMSDRM_drmModePageFlip\s*\([^;]+;)", re.DOTALL)
               m = pattern.search(t)
               if m:
-                  fallback = "\n    /* " + marker2 + " */\n    if (ret != 0 && (flip_flags & DRM_MODE_PAGE_FLIP_ASYNC)) {\n        SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO, \"Async pageflip rejected; using synchronous flips.\");\n        viddata->async_pageflip_support = SDL_FALSE;\n        flip_flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;\n        ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id, fb_info->fb_id, flip_flags, &windata->waiting_for_flip);\n    }\n"
+                  fallback = (
+                      "\n    /* " + marker2 + " */\n"
+                      "    if (ret != 0 && (flip_flags & DRM_MODE_PAGE_FLIP_ASYNC)) {\n"
+                      "        SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO, \"Async pageflip rejected; using synchronous flips.\");\n"
+                      "        viddata->async_pageflip_support = SDL_FALSE;\n"
+                      "        flip_flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;\n"
+                      "        ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id, fb_info->fb_id, flip_flags, &windata->waiting_for_flip);\n"
+                      "    }\n"
+                  )
                   t = t[:m.end()] + fallback + t[m.end():]
                   path.write_text(t)
                   print("OK: Pageflip-Fallback eingefügt.")
               else:
-                  print("WARNUNG: PageFlip-Aufruf nicht gefunden.")
+                  print("WARNUNG: KMSDRM_drmModePageFlip-Aufruf nicht gefunden.")
+          else:
+              print("OK: Pageflip-Fallback bereits vorhanden.")
           PYEOF
 
       - name: Build SDL2 with KMSDRM and cross-compile FTEQW
@@ -93,6 +113,9 @@ jobs:
               python3 /tmp/patch_kmsdrm.py .
 
               # ── 3. SDL2 statisch mit KMSDRM kompilieren ──
+              # -Wno-declaration-after-statement as safety net in case the
+              # anchor line moved in a future SDL2 release.
+              CFLAGS="-Wno-declaration-after-statement" \
               ./configure --prefix=/usr/local \
                 --host=aarch64-linux-gnu \
                 --enable-video-kmsdrm \
