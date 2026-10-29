@@ -2,16 +2,12 @@ name: Build NZP Engine (ARM64 Cross-Compile, GLIBC 2.31, KMSDRM)
 
 on:
   workflow_dispatch:
-  push:
-    branches: [master]
 
 jobs:
   build-arm64-cross:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-
+    runs-on: ubuntu-22.04
     steps:
-      - name: Checkout fteqw
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           repository: nzp-team/fteqw
@@ -19,7 +15,7 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Patch CRC check (NZP-M9)
+      - name: Patch PR_SSQC_CheckHeaderCrc (CRC check disabled)
         run: |
           set -euo pipefail
           PR_CMDS=$(find . -path "*/engine/server/pr_cmds.c" | head -n 1)
@@ -27,10 +23,49 @@ jobs:
           sed -i '/pbool PDECL PR_SSQC_CheckHeaderCrc/{n;s/{/{\n    return true; \/\/ NZP-M9: CRC check disabled/;}' "$PR_CMDS"
           grep -A3 "PR_SSQC_CheckHeaderCrc" "$PR_CMDS" | head -10
 
-      - name: Build in Ubuntu 20.04 container (GLIBC 2.31, SDL2 + KMSDRM Patches)
+      - name: Stage SDL2 KMSDRM patch script on host
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/nzp-build"
+          cat > "$RUNNER_TEMP/nzp-build/patch_kmsdrm.py" << 'PYEOF'
+          import sys, re, pathlib
+
+          path = pathlib.Path(sys.argv[1] + "/src/video/kmsdrm/SDL_kmsdrmvideo.c")
+          t = path.read_text()
+
+          # Fix 1: Force SDL_WINDOW_OPENGL flag for Mali-G31 EGL
+          marker = "NZP-M9-KMSDRM-WINDOW-FLAG"
+          if marker not in t:
+              pattern = re.compile(r"(KMSDRM_CreateWindow\s*\([^)]*\)\s*\{)", re.DOTALL)
+              m = pattern.search(t)
+              if m:
+                  insert = "\n    /* " + marker + " */\n    if (!(window->flags & SDL_WINDOW_VULKAN)) {\n        window->flags |= SDL_WINDOW_OPENGL;\n    }\n"
+                  t = t[:m.end()] + insert + t[m.end():]
+                  path.write_text(t)
+                  print("OK: KMSDRM Window-Flag Patch angewendet.")
+              else:
+                  print("WARNUNG: KMSDRM_CreateWindow nicht gefunden.")
+
+          # Fix 2: Pageflip Fallback (disable async flips if driver rejects them)
+          t = path.read_text()
+          marker2 = "NZP-M9-PAGEFLIP-FALLBACK"
+          if marker2 not in t:
+              pattern = re.compile(r"(ret = KMSDRM_drmModePageFlip\([^;]+;)", re.DOTALL)
+              m = pattern.search(t)
+              if m:
+                  fallback = "\n    /* " + marker2 + " */\n    if (ret != 0 && (flip_flags & DRM_MODE_PAGE_FLIP_ASYNC)) {\n        SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO, \"Async pageflip rejected; using synchronous flips.\");\n        viddata->async_pageflip_support = SDL_FALSE;\n        flip_flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;\n        ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id, fb_info->fb_id, flip_flags, &windata->waiting_for_flip);\n    }\n"
+                  t = t[:m.end()] + fallback + t[m.end():]
+                  path.write_text(t)
+                  print("OK: Pageflip-Fallback eingefügt.")
+              else:
+                  print("WARNUNG: PageFlip-Aufruf nicht gefunden.")
+          PYEOF
+
+      - name: Build SDL2 with KMSDRM and cross-compile FTEQW
         run: |
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/workspace" \
+            -v "$RUNNER_TEMP/nzp-build/patch_kmsdrm.py:/tmp/patch_kmsdrm.py:ro" \
             -w /workspace \
             ubuntu:20.04 bash -c '
               set -euo pipefail
@@ -54,40 +89,7 @@ jobs:
               tar xf "SDL2-${SDL2_VER}.tar.gz"
               cd "SDL2-${SDL2_VER}"
 
-              # ── 2. SDL2 mit Mali-G31 KMSDRM-Fixes patchen ──
-              cat << "PYEOF" > /tmp/patch_kmsdrm.py
-              import sys, re, pathlib
-
-              # Fix 1: Window-Flag erzwingen (Mali-G31 braucht das für EGL)
-              path = pathlib.Path(sys.argv[1] + "/src/video/kmsdrm/SDL_kmsdrmvideo.c")
-              t = path.read_text()
-              marker = "NZP-M9-KMSDRM-WINDOW-FLAG"
-              if marker not in t:
-                  pattern = re.compile(r"(KMSDRM_CreateWindow\s*\([^)]*\)\s*\{)", re.DOTALL)
-                  m = pattern.search(t)
-                  if m:
-                      insert = "\n    /* " + marker + " */\n    if (!(window->flags & SDL_WINDOW_VULKAN)) {\n        window->flags |= SDL_WINDOW_OPENGL;\n    }\n"
-                      t = t[:m.end()] + insert + t[m.end():]
-                      path.write_text(t)
-                      print("OK: KMSDRM Window-Flag Patch angewendet.")
-                  else:
-                      print("WARNUNG: KMSDRM_CreateWindow nicht gefunden.")
-
-              # Fix 2: Pageflip Fallback (Mali-G31 stürzt bei Async-Flips ab)
-              t = path.read_text()
-              marker2 = "NZP-M9-PAGEFLIP-FALLBACK"
-              if marker2 not in t:
-                  pattern = re.compile(r"(ret = KMSDRM_drmModePageFlip\([^;]+;)", re.DOTALL)
-                  m = pattern.search(t)
-                  if m:
-                      fallback = "\n    /* " + marker2 + " */\n    if (ret != 0 && (flip_flags & DRM_MODE_PAGE_FLIP_ASYNC)) {\n        SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO, \"Async pageflip rejected; using synchronous flips.\");\n        viddata->async_pageflip_support = SDL_FALSE;\n        flip_flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;\n        ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id, fb_info->fb_id, flip_flags, &windata->waiting_for_flip);\n    }\n"
-                      t = t[:m.end()] + fallback + t[m.end():]
-                      path.write_text(t)
-                      print("OK: Pageflip-Fallback eingefügt.")
-                  else:
-                      print("WARNUNG: PageFlip-Aufruf nicht gefunden.")
-              PYEOF
-              
+              # ── 2. SDL2 patchen (Script vom Host gemountet) ──
               python3 /tmp/patch_kmsdrm.py .
 
               # ── 3. SDL2 statisch mit KMSDRM kompilieren ──
@@ -115,7 +117,6 @@ jobs:
 
               OPT_FLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 -funsafe-math-optimizations -fno-math-errno -fno-trapping-math -fomit-frame-pointer -funroll-loops -pipe"
 
-              # SDL2 in den FTEQW-libs-Ordner kopieren, damit makelibs es nicht überschreibt
               mkdir -p libs-aarch64-linux-gnu
               cp /usr/local/lib/libSDL2.a libs-aarch64-linux-gnu/
               cp -r /usr/local/include/SDL2 libs-aarch64-linux-gnu/
@@ -135,8 +136,7 @@ jobs:
                 -j"$(nproc)"
             '
 
-      - name: Locate binary and verify architecture
-        if: success()
+      - name: Verify Binary (fail with diagnostics)
         run: |
           set -euo pipefail
           BIN=$(find engine/release -maxdepth 1 -type f \
@@ -147,28 +147,17 @@ jobs:
             | grep -v '\.db$' | head -1)
 
           if [ -z "$BIN" ]; then
-            echo "FEHLER: Binary nicht gefunden!"
-            find engine/release -maxdepth 1 -type f
+            echo "::error::Binary nicht gefunden. Inhalt von engine/release:"
+            find engine/release -maxdepth 1 -type f -printf '%f\n' || true
+            echo "::error::Prüfe den Docker-Build-Output oben auf Compiler-Fehler."
             exit 1
           fi
 
           file "$BIN"
           if ! file "$BIN" | grep -q "ARM aarch64"; then
-            echo "FEHLER: Binary ist NICHT ARM64!"
+            echo "::error::Binary ist NICHT ARM64: $BIN"
             exit 1
           fi
           echo "OK: Binary ist ARM64"
-
           echo "=== GLIBC-Version der Binary ==="
           readelf --version-info "$BIN" 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sort -u || true
-
-      - name: Upload artifact
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: nzp-aarch64-glibc231-kmsdrm
-          path: |
-            engine/release/nzportablearm64
-            engine/release/nzportablearm64.db
-          if-no-files-found: error
-          retention-days: 30
