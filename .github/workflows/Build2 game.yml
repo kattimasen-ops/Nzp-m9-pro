@@ -1,4 +1,4 @@
-name: Build NZP Engine (RK3326 ARM64, KMSDRM, SDL2 linked)
+name: Build NZP Engine (RK3326 ARM64, KMSDRM, SDL Video)
 
 on:
   workflow_dispatch:
@@ -21,6 +21,7 @@ jobs:
           PR_CMDS=$(find . -path "*/engine/server/pr_cmds.c" | head -n 1)
           [ -n "$PR_CMDS" ] || { echo "FEHLER: pr_cmds.c nicht gefunden"; exit 1; }
           sed -i '/pbool PDECL PR_SSQC_CheckHeaderCrc/{n;s/{/{\n    return true; \/\/ NZP-M9: CRC check disabled/;}' "$PR_CMDS"
+          grep -A3 "PR_SSQC_CheckHeaderCrc" "$PR_CMDS" | head -10
 
       - name: Stage SDL2 KMSDRM patch script on host
         run: |
@@ -32,6 +33,7 @@ jobs:
           path = pathlib.Path(sys.argv[1] + "/src/video/kmsdrm/SDL_kmsdrmvideo.c")
           t = path.read_text()
 
+          # Fix 1: Force SDL_WINDOW_OPENGL flag for Mali-G31 EGL.
           marker = "NZP-M9-KMSDRM-WINDOW-FLAG"
           if marker not in t:
               pattern = re.compile(r"(window->driverdata\s*=\s*windata\s*;)", re.DOTALL)
@@ -47,10 +49,11 @@ jobs:
                   path.write_text(t)
                   print("OK: KMSDRM Window-Flag Patch angewendet.")
               else:
-                  print("WARNUNG: window->driverdata = windata; nicht gefunden.")
+                  print("WARNUNG: 'window->driverdata = windata;' nicht gefunden.")
           else:
               print("OK: Window-Flag Patch bereits vorhanden.")
 
+          # Fix 2: Pageflip Fallback (disable async flips if driver rejects them).
           t = path.read_text()
           marker2 = "NZP-M9-PAGEFLIP-FALLBACK"
           if marker2 not in t:
@@ -85,6 +88,7 @@ jobs:
               set -euo pipefail
               export DEBIAN_FRONTEND=noninteractive
 
+              # ── Multiarch fuer arm64 aktivieren ──
               dpkg --add-architecture arm64
               sed -i "s|^deb |deb [arch=amd64] |" /etc/apt/sources.list
               {
@@ -95,24 +99,34 @@ jobs:
 
               apt-get update
 
+              # ── Host-Tools (amd64) inkl. git ──
               apt-get install -y --no-install-recommends \
                 gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
                 binutils-aarch64-linux-gnu \
                 build-essential make git pkg-config wget ca-certificates python3
 
+              # ── Git-Ownership reparieren (NACH git-Installation) ──
               git config --global --add safe.directory /workspace
 
+              # ── arm64-Entwicklungsbibliotheken ──
+              # libxss-dev:arm64 liefert X11/extensions/scrnsaver.h, das
+              # gl_vidlinuxglx.c einbindet, auch wenn -DNO_X11 den Code
+              # spaeter deaktiviert. Ohne diesen Header bricht die Kompilierung.
+              # libxrandr-dev, libxi-dev, libxext-dev fuer weitere X11-Header.
               apt-get install -y --no-install-recommends \
                 libdrm-dev:arm64 libgbm-dev:arm64 \
                 libgles2-mesa-dev:arm64 libegl1-mesa-dev:arm64 \
                 libasound2-dev:arm64 zlib1g-dev:arm64 \
-                libpng-dev:arm64 libjpeg-dev:arm64
+                libpng-dev:arm64 libjpeg-dev:arm64 \
+                libxss-dev:arm64 libxrandr-dev:arm64 \
+                libxi-dev:arm64 libxext-dev:arm64
 
-              # ── SDL2-Header fuer den Compiler bereitstellen ──
+              # ── pkg-config auf arm64-Pfade umbiegen ──
               export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
               export PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
               export PKG_CONFIG_SYSROOT_DIR=/
 
+              # ── 1. SDL2 herunterladen und patchen ──
               SDL2_VER="2.30.7"
               cd /tmp
               wget -q "https://github.com/libsdl-org/SDL/releases/download/release-${SDL2_VER}/SDL2-${SDL2_VER}.tar.gz"
@@ -120,6 +134,7 @@ jobs:
               cd "SDL2-${SDL2_VER}"
               python3 /tmp/patch_kmsdrm.py .
 
+              # ── 2. SDL2 als Shared Library mit KMSDRM bauen ──
               CFLAGS="-fPIC -Wno-declaration-after-statement" \
               LDFLAGS="-L/usr/lib/aarch64-linux-gnu" \
               ./configure --prefix=/usr/local \
@@ -133,6 +148,7 @@ jobs:
               make -j"$(nproc)"
               make install
 
+              # ── 3. FTEQW bauen (dynamisch gegen unsere SDL2) ──
               cd /workspace/engine
 
               export CC=aarch64-linux-gnu-gcc
@@ -141,17 +157,21 @@ jobs:
               export RANLIB=aarch64-linux-gnu-ranlib
               export STRIP=aarch64-linux-gnu-strip
 
-              # ── Entscheidend: PKGCONFIG auf das Host-pkg-config setzen ──
+              # ── PKGCONFIG auf das Host-pkg-config setzen ──
               # Die Makefile erwartet fuer linux_arm64 standardmaessig
-              # aarch64-linux-gnu-pkg-config. Existiert das nicht, setzt sie
-              # PKGCONFIG auf /bin/false und alle SDL2-Linker-Flags fallen weg.
-              # Genau das erzeugt die undefined references zu SDL_*.
+              # aarch64-linux-gnu-pkg-config. Ohne diese Variable setzt sie
+              # PKGCONFIG auf /bin/false und alle SDL2-Linker-Flags fallen
+              # weg -> undefined references zu SDL_*.
               export PKGCONFIG=pkg-config
 
               OPT_FLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 \
                 -funsafe-math-optimizations -fno-math-errno \
-                -fno-trapping-math -fomit-frame-pointer -funroll-loops -pipe"
+                -fno-trapping-math -fomit-frame-pointer -funroll-loops -pipe \
+                -DNO_X11"
 
+              # ── SDL2-Header flach UND in SDL2/ Unterordner ──
+              # gl_vidsdl.c inkludiert <SDL.h>, andere Stellen <SDL2/SDL.h>.
+              # Beide Pfade muessen aufloesbar sein.
               mkdir -p libs-aarch64-linux-gnu
               cp -r /usr/local/include/SDL2/* libs-aarch64-linux-gnu/
               mkdir -p libs-aarch64-linux-gnu/SDL2
@@ -165,17 +185,20 @@ jobs:
                 FTE_TARGET=linux_arm64 \
                 FTE_CONFIG=nzportable \
                 USE_SDL=2 \
+                NO_X11=1 \
                 CC="${CC}" \
                 CXX="${CXX}" \
                 PKGCONFIG="${PKGCONFIG}" \
                 CPUOPTIMIZATIONS="${OPT_FLAGS}" \
                 -j"$(nproc)"
 
+              # ── 4. Gepatchte SDL2-Shared-Libs ins Release-Verzeichnis ──
               mkdir -p /workspace/engine/release
               cp -a /usr/local/lib/libSDL2-2.0.so* /workspace/engine/release/ || true
               cd /workspace/engine/release
               ln -sf libSDL2-2.0.so.0 libSDL2-2.0.so || true
 
+              # ── 5. Patches verifizieren ──
               echo "=== Patch-Marker in libSDL2-2.0.so.0 ==="
               strings libSDL2-2.0.so.0 | grep "NZP-M9" || echo "WARNUNG: Patch-Marker nicht gefunden!"
             '
@@ -200,10 +223,10 @@ jobs:
           fi
           echo "OK: Binary ist ARM64"
 
-          echo "=== SDL2-Shared-Libs ==="
+          echo "=== SDL2-Shared-Libs im Release ==="
           ls -la engine/release/libSDL2-2.0.so*
 
-          echo "=== GLIBC-Version ==="
+          echo "=== GLIBC-Version der Binary ==="
           readelf --version-info "$BIN" 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sort -u || true
 
       - name: Upload Binary + SDL2
