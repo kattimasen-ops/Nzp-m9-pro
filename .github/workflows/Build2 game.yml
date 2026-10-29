@@ -29,22 +29,33 @@ jobs:
           sed -i '/pbool PDECL PR_SSQC_CheckHeaderCrc/{n;s/{/{\n    return true; \/\/ NZP-M9: CRC check disabled/;}' "$PR_CMDS"
           grep -A2 -n "PR_SSQC_CheckHeaderCrc" "$PR_CMDS" | head -5 || true
 
-      - name: Patch engine/Makefile (gl_vidsdl.o + gl_videgl.o + in_sdl.o/sys_sdl.o)
+      - name: Makefile-Patch-Script auf Host schreiben
         run: |
           set -euo pipefail
-          MAKEFILE=$(find . -path "*/engine/Makefile" | head -n 1)
-          [ -n "$MAKEFILE" ] || { echo "FEHLER: engine/Makefile nicht gefunden"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/nzp-build"
+          cat > "$RUNNER_TEMP/nzp-build/patch_makefile.py" << 'PYEOF'
+          import sys, pathlib
 
-          sed -i 's/gl_vidlinuxglx\.o/gl_vidsdl.o/g' "$MAKEFILE"
+          path = pathlib.Path(sys.argv[1])
+          lines = path.read_text().splitlines()
+          order = ["gl_vidsdl.o", "gl_videgl.o", "in_sdl.o", "sys_sdl.o"]
 
-          grep -q 'gl_videgl\.o' "$MAKEFILE" || \
-            sed -i 's/gl_vidsdl\.o/gl_vidsdl.o gl_videgl.o/' "$MAKEFILE"
+          for i, line in enumerate(lines):
+              if line.startswith("GLCL_OBJS="):
+                  prefix, rest = line.split("=", 1)
+                  tokens = rest.split()
+                  tokens = ["gl_vidsdl.o" if x == "gl_vidlinuxglx.o" else x for x in tokens]
+                  tokens = [x for x in tokens if x not in order]
+                  tokens.extend(order)
+                  lines[i] = prefix + "=" + " ".join(tokens)
+                  print(f"GLCL_OBJS[{i+1}]={lines[i]}")
+                  break
+          else:
+              print("FEHLER: GLCL_OBJS= nicht gefunden")
+              sys.exit(1)
 
-          grep -q 'gl_vidsdl\.o.*in_sdl\.o' "$MAKEFILE" || \
-            sed -i 's/gl_vidsdl\.o/gl_vidsdl.o in_sdl.o sys_sdl.o/' "$MAKEFILE"
-
-          echo "=== GLCL_OBJS-Zeile nach Patch ==="
-          grep -n "GLCL_OBJS=" "$MAKEFILE" | head -3
+          path.write_text("\n".join(lines) + "\n")
+          PYEOF
 
       - name: KMSDRM Patch-Script auf Host schreiben
         run: |
@@ -98,6 +109,7 @@ jobs:
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/workspace" \
             -v "$RUNNER_TEMP/nzp-build/patch_kmsdrm.py:/tmp/patch_kmsdrm.py:ro" \
+            -v "$RUNNER_TEMP/nzp-build/patch_makefile.py:/tmp/patch_makefile.py:ro" \
             -w /workspace \
             ubuntu:20.04 bash -c '
               set -euo pipefail
@@ -152,15 +164,11 @@ jobs:
               make -j"$(nproc)"
               make install
 
-              echo "=== /usr/local/include/ ==="
-              ls -la /usr/local/include/ || true
               echo "=== /usr/local/include/SDL2/ (erste 15) ==="
               ls -la /usr/local/include/SDL2/ | head -15 || true
 
               if [ ! -d /usr/local/include/SDL2 ] || [ -z "$(ls -A /usr/local/include/SDL2 2>/dev/null)" ]; then
-                echo "FATAL: /usr/local/include/SDL2 fehlt oder leer trotz erfolgreichem make install"
-                echo "Quelle /tmp/SDL2-2.30.7/include/:"
-                ls -la /tmp/SDL2-2.30.7/include/ | head -20 || true
+                echo "FATAL: /usr/local/include/SDL2 fehlt oder leer"
                 exit 1
               fi
 
@@ -185,7 +193,7 @@ jobs:
 
               export SDLCONFIG=/usr/local/bin/sdl2-config
               export SDLLIBS="-L/usr/local/lib -lSDL2"
-              export SDLCFLAGS="-I/usr/local/include/SDL2 -D_REENTRANT"
+              export SDLCFLAGS="-I/usr/local/include/SDL2 -D_REENTRANT -DUSE_SDL=2"
 
               OPT_FLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 \
                 -funsafe-math-optimizations -fno-math-errno \
@@ -199,11 +207,21 @@ jobs:
               echo "=== Verifikation Header-Kopie ==="
               ls -la libs-aarch64-linux-gnu/SDL.h libs-aarch64-linux-gnu/SDL2/SDL.h
 
+              echo "=== Makefile patchen: GLCL_OBJS ==="
+              python3 /tmp/patch_makefile.py /workspace/engine/Makefile
+              grep -n "^GLCL_OBJS=" /workspace/engine/Makefile | head -1
+              grep -n "^GLCL_OBJS=" /workspace/engine/Makefile | head -1 | grep "gl_videgl.o" || { echo "FATAL: gl_videgl.o fehlt in GLCL_OBJS"; exit 1; }
+              grep -n "^GLCL_OBJS=" /workspace/engine/Makefile | head -1 | grep "in_sdl.o" || { echo "FATAL: in_sdl.o fehlt in GLCL_OBJS"; exit 1; }
+              grep -n "^GLCL_OBJS=" /workspace/engine/Makefile | head -1 | grep "sys_sdl.o" || { echo "FATAL: sys_sdl.o fehlt in GLCL_OBJS"; exit 1; }
+
               echo "=== Dependencies bauen (makelibs) ==="
               time make makelibs FTE_TARGET=linux_arm64
 
+              echo "=== Engine-Objekte alt löschen, damit USE_SDL=2 sicher greift ==="
+              rm -rf /workspace/engine/release/m_linuxarm64
+
               echo "=== Engine cross-kompilieren (RK3326, KMSDRM, SDL2) ==="
-              time make m-rel \
+              if ! time make m-rel \
                 FTE_TARGET=linux_arm64 \
                 FTE_CONFIG=nzportable \
                 USE_SDL=2 \
@@ -217,7 +235,18 @@ jobs:
                 SDLCFLAGS="${SDLCFLAGS}" \
                 CPUOPTIMIZATIONS="${OPT_FLAGS}" \
                 LDFLAGS="-L/usr/local/lib -Wl,-rpath-link,/usr/local/lib -lSDL2" \
-                -j"$(nproc)"
+                -j"$(nproc)"; then
+                echo "=== LINK FEHLGESCHLAGEN — nm-Diagnose ==="
+                echo "--- in_sdl.o ---"
+                aarch64-linux-gnu-nm /workspace/engine/release/m_linuxarm64/in_sdl.o | grep -E "INS_Init|INS_Commands|INS_SetOSK" || true
+                echo "--- sys_sdl.o ---"
+                aarch64-linux-gnu-nm /workspace/engine/release/m_linuxarm64/sys_sdl.o | grep -E "Sys_SendKeyEvents" || true
+                echo "--- gl_videgl.o ---"
+                aarch64-linux-gnu-nm /workspace/engine/release/m_linuxarm64/gl_videgl.o | grep -E "eglrendererinfo" || true
+                echo "--- gl_vidsdl.o ---"
+                aarch64-linux-gnu-nm /workspace/engine/release/m_linuxarm64/gl_vidsdl.o | grep -E "IN_ActivateMouse|IN_DeactivateMouse|mouseactive" || true
+                exit 1
+              fi
 
               mkdir -p /workspace/engine/release
               cp -a /usr/local/lib/libSDL2-2.0.so* /workspace/engine/release/ || true
