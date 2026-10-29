@@ -29,9 +29,7 @@ jobs:
           VID_FILE=$(find . -path "*/engine/gl/gl_vidlinuxglx.c" | head -n 1)
           [ -n "$VID_FILE" ] || { echo "FEHLER: gl_vidlinuxglx.c nicht gefunden"; exit 1; }
 
-          # Nur patchen, wenn noch nicht geschehen
           if ! grep -q "NZP-M9-USE-SDL-VIDEO" "$VID_FILE"; then
-            # SDL-Backend einbinden, wenn NO_X11 definiert ist
             sed -i '1i /* NZP-M9-USE-SDL-VIDEO */\n#ifdef NO_X11\n#include "gl_vidsdl.c"\n#else' "$VID_FILE"
             echo '#endif' >> "$VID_FILE"
             echo "OK: gl_vidlinuxglx.c patched (NO_X11 -> gl_vidsdl.c)"
@@ -120,7 +118,6 @@ jobs:
                 binutils-aarch64-linux-gnu \
                 build-essential make git pkg-config wget ca-certificates python3
 
-              # Git-Ownership reparieren (nach git-Installation)
               git config --global --add safe.directory /workspace
 
               apt-get install -y --no-install-recommends \
@@ -166,8 +163,19 @@ jobs:
                 -fno-trapping-math -fomit-frame-pointer -funroll-loops -pipe \
                 -DNO_X11"
 
+              # ── SDL2-Header so platzieren, dass <SDL.h> UND <SDL2/SDL.h> gefunden werden ──
+              # FTEQW inkludiert in gl_vidsdl.c `#include <SDL.h>`. Der Compiler
+              # durchsucht nur /workspace/engine/libs-aarch64-linux-gnu. Deshalb
+              # muessen die Header flach (ohne SDL2/-Praefix) dort liegen. Ein
+              # zweiter Kopiervorgang nach libs-aarch64-linux-gnu/SDL2 deckt
+              # Code ab, der `#include <SDL2/SDL.h>` schreibt.
               mkdir -p libs-aarch64-linux-gnu
-              cp -r /usr/local/include/SDL2 libs-aarch64-linux-gnu/
+              cp -r /usr/local/include/SDL2/* libs-aarch64-linux-gnu/
+              mkdir -p libs-aarch64-linux-gnu/SDL2
+              cp -r /usr/local/include/SDL2/* libs-aarch64-linux-gnu/SDL2/
+
+              echo "=== SDL2-Header im libs-Verzeichnis ==="
+              ls libs-aarch64-linux-gnu/SDL.h libs-aarch64-linux-gnu/SDL2/SDL.h 2>&1 || true
 
               echo "=== Dependencies bauen (makelibs) ==="
               time make makelibs FTE_TARGET=linux_arm64
@@ -191,9 +199,9 @@ jobs:
               echo "=== Patch-Marker in libSDL2-2.0.so.0 ==="
               strings libSDL2-2.0.so.0 | grep "NZP-M9" || echo "WARNUNG: Patch-Marker nicht gefunden!"
 
-              echo "=== Video-Backend in der Binary ==="
+              echo "=== Video-Symbole in der Binary ==="
               BIN=$(find /workspace/engine/release -maxdepth 1 -type f -name "nzportable*" | head -1)
-              strings "$BIN" 2>/dev/null | grep -iE "SDL GLVID_Init|KMSDRM" | head -5 || true
+              strings "$BIN" 2>/dev/null | grep -E "GLVID_Init|SDL_Init|KMSDRM" | head -5 || true
             '
 
       - name: Verify Binary and SDL2
