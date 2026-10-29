@@ -23,22 +23,35 @@ jobs:
           sed -i '/pbool PDECL PR_SSQC_CheckHeaderCrc/{n;s/{/{\n    return true; \/\/ NZP-M9: CRC check disabled/;}' "$PR_CMDS"
           grep -A3 "PR_SSQC_CheckHeaderCrc" "$PR_CMDS" | head -10
 
-      - name: Patch gl_vidlinuxglx.c to use SDL video backend when NO_X11 is set
+      - name: Patch FTEQW sources for NO_X11 + SDL backend
         run: |
           set -euo pipefail
+
+          # ── 1. gl_vidlinuxglx.c: SDL-Video + EGL-Rendererinfo im NO_X11-Zweig ──
           VID_FILE=$(find . -path "*/engine/gl/gl_vidlinuxglx.c" | head -n 1)
           [ -n "$VID_FILE" ] || { echo "FEHLER: gl_vidlinuxglx.c nicht gefunden"; exit 1; }
 
           if ! grep -q "NZP-M9-USE-SDL-VIDEO" "$VID_FILE"; then
-            sed -i '1i /* NZP-M9-USE-SDL-VIDEO */\n#ifdef NO_X11\n#include "gl_vidsdl.c"\n#else' "$VID_FILE"
+            sed -i '1i /* NZP-M9-USE-SDL-VIDEO */\n#ifdef NO_X11\n#include "gl_videgl.h"\n#include "gl_vidsdl.c"\n#else' "$VID_FILE"
             echo '#endif' >> "$VID_FILE"
-            echo "OK: gl_vidlinuxglx.c patched (NO_X11 -> gl_vidsdl.c)"
+            echo "OK: gl_vidlinuxglx.c patched (NO_X11 -> gl_videgl.h + gl_vidsdl.c)"
           else
             echo "OK: gl_vidlinuxglx.c Patch bereits vorhanden."
           fi
 
-          head -5 "$VID_FILE"
-          tail -3 "$VID_FILE"
+          # ── 2. in_generic.c: SDL-Eingabeschicht einbinden ──
+          IN_FILE=$(find . -path "*/engine/client/in_generic.c" | head -n 1)
+          [ -n "$IN_FILE" ] || { echo "FEHLER: in_generic.c nicht gefunden"; exit 1; }
+
+          if ! grep -q "NZP-M9-USE-SDL-INPUT" "$IN_FILE"; then
+            sed -i '1i /* NZP-M9-USE-SDL-INPUT */\n#ifdef NO_X11\n#include "in_sdl.c"\n#endif' "$IN_FILE"
+            echo "OK: in_generic.c patched (NO_X11 -> in_sdl.c)"
+          else
+            echo "OK: in_generic.c Patch bereits vorhanden."
+          fi
+
+          head -6 "$VID_FILE"
+          head -4 "$IN_FILE"
 
       - name: Stage SDL2 KMSDRM patch script on host
         run: |
@@ -163,24 +176,15 @@ jobs:
                 -fno-trapping-math -fomit-frame-pointer -funroll-loops -pipe \
                 -DNO_X11"
 
-              # ── SDL2-Header so platzieren, dass <SDL.h> UND <SDL2/SDL.h> gefunden werden ──
-              # FTEQW inkludiert in gl_vidsdl.c `#include <SDL.h>`. Der Compiler
-              # durchsucht nur /workspace/engine/libs-aarch64-linux-gnu. Deshalb
-              # muessen die Header flach (ohne SDL2/-Praefix) dort liegen. Ein
-              # zweiter Kopiervorgang nach libs-aarch64-linux-gnu/SDL2 deckt
-              # Code ab, der `#include <SDL2/SDL.h>` schreibt.
               mkdir -p libs-aarch64-linux-gnu
               cp -r /usr/local/include/SDL2/* libs-aarch64-linux-gnu/
               mkdir -p libs-aarch64-linux-gnu/SDL2
               cp -r /usr/local/include/SDL2/* libs-aarch64-linux-gnu/SDL2/
 
-              echo "=== SDL2-Header im libs-Verzeichnis ==="
-              ls libs-aarch64-linux-gnu/SDL.h libs-aarch64-linux-gnu/SDL2/SDL.h 2>&1 || true
-
               echo "=== Dependencies bauen (makelibs) ==="
               time make makelibs FTE_TARGET=linux_arm64
 
-              echo "=== Engine cross-kompilieren (RK3326, KMSDRM, SDL Video) ==="
+              echo "=== Engine cross-kompilieren (RK3326, KMSDRM, SDL Video+Input) ==="
               time make m-rel \
                 FTE_TARGET=linux_arm64 \
                 FTE_CONFIG=nzportable \
@@ -199,9 +203,9 @@ jobs:
               echo "=== Patch-Marker in libSDL2-2.0.so.0 ==="
               strings libSDL2-2.0.so.0 | grep "NZP-M9" || echo "WARNUNG: Patch-Marker nicht gefunden!"
 
-              echo "=== Video-Symbole in der Binary ==="
+              echo "=== Video-/Input-Symbole in der Binary ==="
               BIN=$(find /workspace/engine/release -maxdepth 1 -type f -name "nzportable*" | head -1)
-              strings "$BIN" 2>/dev/null | grep -E "GLVID_Init|SDL_Init|KMSDRM" | head -5 || true
+              strings "$BIN" 2>/dev/null | grep -E "GLVID_Init|INS_Init|eglrendererinfo" | head -5 || true
             '
 
       - name: Verify Binary and SDL2
