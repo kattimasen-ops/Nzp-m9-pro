@@ -33,7 +33,6 @@ jobs:
           path = pathlib.Path(sys.argv[1] + "/src/video/kmsdrm/SDL_kmsdrmvideo.c")
           t = path.read_text()
 
-          # Fix 1: Force SDL_WINDOW_OPENGL flag for Mali-G31 EGL.
           marker = "NZP-M9-KMSDRM-WINDOW-FLAG"
           if marker not in t:
               pattern = re.compile(r"(window->driverdata\s*=\s*windata\s*;)", re.DOTALL)
@@ -49,11 +48,10 @@ jobs:
                   path.write_text(t)
                   print("OK: KMSDRM Window-Flag Patch angewendet.")
               else:
-                  print("WARNUNG: 'window->driverdata = windata;' nicht gefunden.")
+                  print("WARNUNG: window->driverdata = windata; nicht gefunden.")
           else:
               print("OK: Window-Flag Patch bereits vorhanden.")
 
-          # Fix 2: Pageflip Fallback (disable async flips if driver rejects them).
           t = path.read_text()
           marker2 = "NZP-M9-PAGEFLIP-FALLBACK"
           if marker2 not in t:
@@ -88,40 +86,33 @@ jobs:
               set -euo pipefail
               export DEBIAN_FRONTEND=noninteractive
 
-              # ── Multiarch für arm64 aktivieren ──
               dpkg --add-architecture arm64
 
-              # ── Quellen trennen: amd64 von archive, arm64 von ports ──
-              # Ubuntu hostet arm64-Pakete für focal NICHT auf archive.ubuntu.com.
-              # Ohne diese Trennung liefert apt update 404-Fehler für alle
-              # binary-arm64/Packages-URLs.
-              sed -i "s/^deb /deb [arch=amd64] /" /etc/apt/sources.list
-              cat > /etc/apt/sources.list.d/arm64-ports.list << "EOF"
-deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal main restricted universe multiverse
-deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-updates main restricted universe multiverse
-deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-security main restricted universe multiverse
-EOF
+              sed -i "s|^deb |deb [arch=amd64] |" /etc/apt/sources.list
+
+              {
+                echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal main restricted universe multiverse"
+                echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-updates main restricted universe multiverse"
+                echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-security main restricted universe multiverse"
+              } > /etc/apt/sources.list.d/arm64-ports.list
+
               apt-get update
 
-              # ── Host-Tools (amd64) ──
               apt-get install -y --no-install-recommends \
                 gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
                 binutils-aarch64-linux-gnu \
                 build-essential make git pkg-config wget ca-certificates python3
 
-              # ── arm64-Entwicklungsbibliotheken (von ports.ubuntu.com) ──
               apt-get install -y --no-install-recommends \
                 libdrm-dev:arm64 libgbm-dev:arm64 \
                 libgles2-mesa-dev:arm64 libegl1-mesa-dev:arm64 \
                 libasound2-dev:arm64 zlib1g-dev:arm64 \
                 libpng-dev:arm64 libjpeg-dev:arm64
 
-              # ── pkg-config auf arm64-Pfade umbiegen ──
               export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
               export PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
               export PKG_CONFIG_SYSROOT_DIR=/
 
-              # ── 1. SDL2 herunterladen und patchen ──
               SDL2_VER="2.30.7"
               cd /tmp
               wget -q "https://github.com/libsdl-org/SDL/releases/download/release-${SDL2_VER}/SDL2-${SDL2_VER}.tar.gz"
@@ -129,7 +120,6 @@ EOF
               cd "SDL2-${SDL2_VER}"
               python3 /tmp/patch_kmsdrm.py .
 
-              # ── 2. SDL2 als Shared Library mit KMSDRM bauen ──
               CFLAGS="-fPIC -Wno-declaration-after-statement" \
               LDFLAGS="-L/usr/lib/aarch64-linux-gnu" \
               ./configure --prefix=/usr/local \
@@ -143,7 +133,6 @@ EOF
               make -j"$(nproc)"
               make install
 
-              # ── 3. FTEQW bauen (dynamisch gegen unsere SDL2) ──
               cd /workspace/engine
 
               export CC=aarch64-linux-gnu-gcc
@@ -171,13 +160,11 @@ EOF
                 CPUOPTIMIZATIONS="${OPT_FLAGS}" \
                 -j"$(nproc)"
 
-              # ── 4. Gepatchte SDL2-Shared-Libs ins Release-Verzeichnis kopieren ──
               mkdir -p /workspace/engine/release
               cp -a /usr/local/lib/libSDL2-2.0.so* /workspace/engine/release/ || true
               cd /workspace/engine/release
               ln -sf libSDL2-2.0.so.0 libSDL2-2.0.so || true
 
-              # ── 5. Prüfen, ob die Patches wirklich in der SDL2 stecken ──
               echo "=== Patch-Marker in libSDL2-2.0.so.0 ==="
               strings /workspace/engine/release/libSDL2-2.0.so.0 | grep "NZP-M9" || echo "WARNUNG: Patch-Marker nicht gefunden!"
             '
