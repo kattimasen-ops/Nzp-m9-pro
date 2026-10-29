@@ -29,7 +29,7 @@ jobs:
           sed -i '/pbool PDECL PR_SSQC_CheckHeaderCrc/{n;s/{/{\n    return true; \/\/ NZP-M9: CRC check disabled/;}' "$PR_CMDS"
           grep -A2 -n "PR_SSQC_CheckHeaderCrc" "$PR_CMDS" | head -5 || true
 
-      - name: Patch engine/Makefile (gl_vidsdl.o + in_sdl.o/sys_sdl.o + gl_videgl.o)
+      - name: Patch engine/Makefile (gl_vidsdl.o + gl_videgl.o + in_sdl.o/sys_sdl.o)
         run: |
           set -euo pipefail
           MAKEFILE=$(find . -path "*/engine/Makefile" | head -n 1)
@@ -155,15 +155,28 @@ jobs:
               make -j"$(nproc)"
               make install
 
+              # Verifikation: Headers muessen da sein, BEVOR wir sie kopieren
+              echo "=== /usr/local/include/ ==="
+              ls -la /usr/local/include/ || true
+              echo "=== /usr/local/include/SDL2/ (erste 10) ==="
+              ls -la /usr/local/include/SDL2/ | head -15 || true
+
+              if [ ! -d /usr/local/include/SDL2 ] || [ -z "$(ls -A /usr/local/include/SDL2 2>/dev/null)" ]; then
+                echo "FATAL: /usr/local/include/SDL2 fehlt oder leer trotz erfolgreichem make install"
+                echo "Quelle /tmp/SDL2-2.30.7/include/ Inhalt:"
+                ls -la /tmp/SDL2-2.30.7/include/ | head -20 || true
+                exit 1
+              fi
+
               for f in /usr/local/lib/libSDL2-2.0.so.0 /usr/local/lib/libSDL2-2.0.so; do
                 [ -e "$f" ] && ln -sf "$f" /usr/local/lib/libSDL2.so && break
               done
-              ls -la /usr/local/lib/libSDL2*
+              ls -la /usr/local/lib/libSDL2* || true
 
               echo "=== sdl2-config --libs ==="
-              /usr/local/bin/sdl2-config --libs
+              /usr/local/bin/sdl2-config --libs || true
               echo "=== pkg-config sdl2 ==="
-              /usr/bin/aarch64-linux-gnu-pkg-config --cflags --libs sdl2
+              /usr/bin/aarch64-linux-gnu-pkg-config --cflags --libs sdl2 || true
 
               cd /workspace/engine
 
@@ -174,7 +187,7 @@ jobs:
               export STRIP=aarch64-linux-gnu-strip
               export PKGCONFIG=/usr/bin/aarch64-linux-gnu-pkg-config
 
-              # WICHTIG: FTEQW's Makefile nutzt fuer SDL2 SDLCONFIG/SDLLIBS, nicht PKGCONFIG.
+              # FTEQW nutzt SDLCONFIG/SDLLIBS, nicht PKGCONFIG, fuer SDL2
               export SDLCONFIG=/usr/local/bin/sdl2-config
               export SDLLIBS="-L/usr/local/lib -lSDL2"
               export SDLCFLAGS="-I/usr/local/include/SDL2 -D_REENTRANT"
@@ -184,10 +197,12 @@ jobs:
                 -fno-trapping-math -fomit-frame-pointer -funroll-loops -pipe \
                 -DNO_X11 -DUSE_SDL=2"
 
-              mkdir -p libs-aarch64-linux-gnu
-              cp -r /usr/local/include/SDL2/* libs-aarch64-linux-gnu/
+              # Robustes kopieren der SDL2-Header (kein Glob mehr!)
               mkdir -p libs-aarch64-linux-gnu/SDL2
-              cp -r /usr/local/include/SDL2/* libs-aarch64-linux-gnu/SDL2/
+              cp -r /usr/local/include/SDL2/. libs-aarch64-linux-gnu/
+              cp -r /usr/local/include/SDL2/. libs-aarch64-linux-gnu/SDL2/
+              echo "=== Verifikation Header-Kopie ==="
+              ls -la libs-aarch64-linux-gnu/SDL.h libs-aarch64-linux-gnu/SDL2/SDL.h
 
               echo "=== Dependencies bauen (makelibs) ==="
               time make makelibs FTE_TARGET=linux_arm64
@@ -210,22 +225,4 @@ jobs:
                 -j"$(nproc)"
 
               mkdir -p /workspace/engine/release
-              cp -a /usr/local/lib/libSDL2-2.0.so* /workspace/engine/release/ || true
-              cp -a /usr/local/lib/libSDL2.so  /workspace/engine/release/ || true
-              cd /workspace/engine/release
-              ln -sf libSDL2-2.0.so.0 libSDL2-2.0.so || true
-
-              echo "=== Patch-Marker in libSDL2-2.0.so.0 ==="
-              strings libSDL2-2.0.so.0 | grep "NZP-M9" || echo "WARNUNG: Patch-Marker nicht gefunden!"
-            '
-
-      - name: Upload Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: nzportable-rk3326-kmsdrm
-          path: |
-            engine/release/nzportablearm64
-            engine/release/nzportablearm64.db
-            engine/release/libSDL2-2.0.so.0
-            engine/release/libSDL2-2.0.so
-          if-no-files-found: error
+              cp -a /usr/local/lib/libSDL2-2.0.so* /works
