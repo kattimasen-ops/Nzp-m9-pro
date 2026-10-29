@@ -41,18 +41,18 @@ jobs:
           order = ["gl_vidsdl.o", "gl_videgl.o", "in_sdl.o", "sys_sdl.o"]
 
           for i, line in enumerate(lines):
-              if line.startswith("GLCL_OBJS="):
+              # gl_vidlinuxglx.o überall ersetzen (auch in GL_OBJS)
+              line = line.replace("gl_vidlinuxglx.o", "gl_vidsdl.o")
+
+              if line.startswith("GLCL_OBJS=") and "$(GL_OBJS)" in line:
                   prefix, rest = line.split("=", 1)
                   tokens = rest.split()
-                  tokens = ["gl_vidsdl.o" if x == "gl_vidlinuxglx.o" else x for x in tokens]
                   tokens = [x for x in tokens if x not in order]
                   tokens.extend(order)
-                  lines[i] = prefix + "=" + " ".join(tokens)
-                  print(f"GLCL_OBJS[{i+1}]={lines[i]}")
-                  break
-          else:
-              print("FEHLER: GLCL_OBJS= nicht gefunden")
-              sys.exit(1)
+                  line = prefix + "=" + " ".join(tokens)
+                  print(f"GLCL_OBJS[{i+1}]={line}")
+
+              lines[i] = line
 
           path.write_text("\n".join(lines) + "\n")
           PYEOF
@@ -193,12 +193,12 @@ jobs:
 
               export SDLCONFIG=/usr/local/bin/sdl2-config
               export SDLLIBS="-L/usr/local/lib -lSDL2"
-              export SDLCFLAGS="-I/usr/local/include/SDL2 -D_REENTRANT -DUSE_SDL=2"
+              export SDLCFLAGS="-I/usr/local/include/SDL2 -D_REENTRANT -DUSE_SDL=2 -DEGLQUAKE"
 
               OPT_FLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 \
                 -funsafe-math-optimizations -fno-math-errno \
                 -fno-trapping-math -fomit-frame-pointer -funroll-loops -pipe \
-                -DNO_X11 -DUSE_SDL=2"
+                -DNO_X11 -DUSE_SDL=2 -DEGLQUAKE"
 
               mkdir -p libs-aarch64-linux-gnu/SDL2
               cp -r /usr/local/include/SDL2/. libs-aarch64-linux-gnu/
@@ -207,12 +207,16 @@ jobs:
               echo "=== Verifikation Header-Kopie ==="
               ls -la libs-aarch64-linux-gnu/SDL.h libs-aarch64-linux-gnu/SDL2/SDL.h
 
-              echo "=== Makefile patchen: GLCL_OBJS ==="
+              echo "=== Makefile patchen: GL_OBJS + alle GLCL_OBJS ==="
               python3 /tmp/patch_makefile.py /workspace/engine/Makefile
-              grep -n "^GLCL_OBJS=" /workspace/engine/Makefile | head -1
-              grep -n "^GLCL_OBJS=" /workspace/engine/Makefile | head -1 | grep "gl_videgl.o" || { echo "FATAL: gl_videgl.o fehlt in GLCL_OBJS"; exit 1; }
-              grep -n "^GLCL_OBJS=" /workspace/engine/Makefile | head -1 | grep "in_sdl.o" || { echo "FATAL: in_sdl.o fehlt in GLCL_OBJS"; exit 1; }
-              grep -n "^GLCL_OBJS=" /workspace/engine/Makefile | head -1 | grep "sys_sdl.o" || { echo "FATAL: sys_sdl.o fehlt in GLCL_OBJS"; exit 1; }
+              echo "=== GL_OBJS-Zeile nach Patch ==="
+              grep -n "^GL_OBJS=" /workspace/engine/Makefile | head -5 || true
+              echo "=== gl_vidlinuxglx.o darf nicht mehr vorkommen ==="
+              grep -n "gl_vidlinuxglx.o" /workspace/engine/Makefile || true
+              echo "=== GLCL_OBJS-Zeilen nach Patch ==="
+              grep -n "^GLCL_OBJS=" /workspace/engine/Makefile | head -5
+              grep -n "^GLCL_OBJS=" /workspace/engine/Makefile | head -5 | grep "gl_videgl.o" || { echo "FATAL: gl_videgl.o fehlt in GLCL_OBJS"; exit 1; }
+              grep -n "^GLCL_OBJS=" /workspace/engine/Makefile | head -5 | grep "gl_vidsdl.o" || { echo "FATAL: gl_vidsdl.o fehlt in GLCL_OBJS"; exit 1; }
 
               echo "=== Dependencies bauen (makelibs) ==="
               time make makelibs FTE_TARGET=linux_arm64
@@ -236,15 +240,15 @@ jobs:
                 CPUOPTIMIZATIONS="${OPT_FLAGS}" \
                 LDFLAGS="-L/usr/local/lib -Wl,-rpath-link,/usr/local/lib -lSDL2" \
                 -j"$(nproc)"; then
-                echo "=== LINK FEHLGESCHLAGEN — nm-Diagnose ==="
-                echo "--- in_sdl.o ---"
-                aarch64-linux-gnu-nm /workspace/engine/release/m_linuxarm64/in_sdl.o | grep -E "INS_Init|INS_Commands|INS_SetOSK" || true
-                echo "--- sys_sdl.o ---"
-                aarch64-linux-gnu-nm /workspace/engine/release/m_linuxarm64/sys_sdl.o | grep -E "Sys_SendKeyEvents" || true
-                echo "--- gl_videgl.o ---"
-                aarch64-linux-gnu-nm /workspace/engine/release/m_linuxarm64/gl_videgl.o | grep -E "eglrendererinfo" || true
-                echo "--- gl_vidsdl.o ---"
-                aarch64-linux-gnu-nm /workspace/engine/release/m_linuxarm64/gl_vidsdl.o | grep -E "IN_ActivateMouse|IN_DeactivateMouse|mouseactive" || true
+                echo "=== LINK FEHLGESCHLAGEN — Objekt-/nm-Diagnose ==="
+                echo "--- gefundene Objekte ---"
+                find /workspace/engine -name 'gl_vidsdl.o' -o -name 'gl_videgl.o' -o -name 'in_sdl.o' -o -name 'sys_sdl.o' || true
+                for f in $(find /workspace/engine -name 'gl_vidsdl.o' -o -name 'gl_videgl.o' -o -name 'in_sdl.o' -o -name 'sys_sdl.o'); do
+                  echo "--- $f ---"
+                  aarch64-linux-gnu-nm "$f" | grep -E 'GLVID_Init|GLVID_DeInit|GLVID_SwapBuffers|GLVID_ApplyGammaRamps|GLVID_SetCaption|eglrendererinfo|INS_Init|INS_Commands|Sys_SendKeyEvents' || true
+                done
+                echo "--- gl_vidcommon.o Referenzen ---"
+                aarch64-linux-gnu-nm /workspace/engine/release/m_linuxarm64/gl_vidcommon.o 2>/dev/null | grep -E 'GLVID_' || true
                 exit 1
               fi
 
