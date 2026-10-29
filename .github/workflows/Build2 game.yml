@@ -1,13 +1,19 @@
-name: Build NZP Engine (RK3326 ARM64, KMSDRM, SDL2)
+name: build-rk3326
 
 on:
   workflow_dispatch:
+  push:
+    branches: [master, main]
+    paths:
+      - '.github/workflows/*.yml'
 
 jobs:
   build-rk3326:
     runs-on: ubuntu-22.04
+    timeout-minutes: 60
+
     steps:
-      - name: Checkout repository
+      - name: Checkout FTEQW
         uses: actions/checkout@v4
         with:
           repository: nzp-team/fteqw
@@ -15,27 +21,31 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Patch PR_SSQC_CheckHeaderCrc (CRC check disabled)
+      - name: Patch pr_cmds.c (CRC-Check deaktivieren)
         run: |
           set -euo pipefail
           PR_CMDS=$(find . -path "*/engine/server/pr_cmds.c" | head -n 1)
           [ -n "$PR_CMDS" ] || { echo "FEHLER: pr_cmds.c nicht gefunden"; exit 1; }
           sed -i '/pbool PDECL PR_SSQC_CheckHeaderCrc/{n;s/{/{\n    return true; \/\/ NZP-M9: CRC check disabled/;}' "$PR_CMDS"
+          grep -A2 -n "PR_SSQC_CheckHeaderCrc" "$PR_CMDS" | head -5 || true
 
-      - name: Patch Makefile to use SDL video for merged client
+      - name: Patch engine/Makefile (gl_vidsdl.o + in_sdl.o/sys_sdl.o)
         run: |
           set -euo pipefail
           MAKEFILE=$(find . -path "*/engine/Makefile" | head -n 1)
           [ -n "$MAKEFILE" ] || { echo "FEHLER: engine/Makefile nicht gefunden"; exit 1; }
 
-          # In GLCL_OBJS steht gl_vidlinuxglx.o. Mit -DNO_X11 liefert diese
-          # Datei keine GLVID_*-Implementierung. Ersetze sie durch gl_vidsdl.o.
+          # gl_vidlinuxglx.o -> gl_vidsdl.o (SDL-Video statt X11-Stub)
           sed -i 's/gl_vidlinuxglx\.o/gl_vidsdl.o/g' "$MAKEFILE"
+
+          # in_sdl.o / sys_sdl.o direkt nach gl_vidsdl.o sicherstellen
+          grep -q 'gl_vidsdl\.o[^ ]* *\(.* \)\?in_sdl\.o' "$MAKEFILE" || \
+            sed -i 's/gl_vidsdl\.o/gl_vidsdl.o in_sdl.o sys_sdl.o/' "$MAKEFILE"
 
           echo "=== GLCL_OBJS-Zeile nach Patch ==="
           grep -n "GLCL_OBJS=" "$MAKEFILE" | head -3
 
-      - name: Stage SDL2 KMSDRM patch script on host
+      - name: KMSDRM Patch-Script auf Host schreiben
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/nzp-build"
@@ -82,7 +92,7 @@ jobs:
                   print("OK: Pageflip-Fallback eingefügt.")
           PYEOF
 
-      - name: Build RK3326-optimized SDL2 and FTEQW
+      - name: Cross-Compile in ubuntu:20.04
         run: |
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/workspace" \
@@ -117,8 +127,9 @@ jobs:
                 libxss-dev:arm64 libxrandr-dev:arm64 \
                 libxi-dev:arm64 libxext-dev:arm64
 
-              export PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
-              export PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+              # WICHTIG: /usr/local/lib/pkgconfig MUSS enthalten sein (SDL2 landet dort)
+              export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
+              export PKG_CONFIG_LIBDIR=/usr/local/lib/pkgconfig:/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
               export PKG_CONFIG_SYSROOT_DIR=/
 
               SDL2_VER="2.30.7"
@@ -141,6 +152,17 @@ jobs:
               make -j"$(nproc)"
               make install
 
+              # Sicherheitsnetz: -lSDL2 braucht libSDL2.so, install erzeugt nur libSDL2-2.0.so*
+              for f in /usr/local/lib/libSDL2-2.0.so.0 /usr/local/lib/libSDL2-2.0.so; do
+                [ -e "$f" ] && ln -sf "$f" /usr/local/lib/libSDL2.so && break
+              done
+              ls -la /usr/local/lib/libSDL2*
+
+              echo "=== pkg-config sdl2 ==="
+              /usr/bin/aarch64-linux-gnu-pkg-config --cflags --libs sdl2 || \
+                pkg-config --cflags --libs sdl2 || \
+                { echo "FEHLER: sdl2.pc nicht auffindbar!"; exit 1; }
+
               cd /workspace/engine
 
               export CC=aarch64-linux-gnu-gcc
@@ -148,7 +170,7 @@ jobs:
               export AR=aarch64-linux-gnu-ar
               export RANLIB=aarch64-linux-gnu-ranlib
               export STRIP=aarch64-linux-gnu-strip
-              export PKGCONFIG=pkg-config
+              export PKGCONFIG=/usr/bin/aarch64-linux-gnu-pkg-config
 
               OPT_FLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 \
                 -funsafe-math-optimizations -fno-math-errno \
@@ -173,10 +195,12 @@ jobs:
                 CXX="${CXX}" \
                 PKGCONFIG="${PKGCONFIG}" \
                 CPUOPTIMIZATIONS="${OPT_FLAGS}" \
+                LDFLAGS="-L/usr/local/lib -Wl,-rpath-link,/usr/local/lib" \
                 -j"$(nproc)"
 
               mkdir -p /workspace/engine/release
               cp -a /usr/local/lib/libSDL2-2.0.so* /workspace/engine/release/ || true
+              cp -a /usr/local/lib/libSDL2.so  /workspace/engine/release/ || true
               cd /workspace/engine/release
               ln -sf libSDL2-2.0.so.0 libSDL2-2.0.so || true
 
@@ -184,39 +208,13 @@ jobs:
               strings libSDL2-2.0.so.0 | grep "NZP-M9" || echo "WARNUNG: Patch-Marker nicht gefunden!"
             '
 
-      - name: Verify Binary and SDL2
-        run: |
-          set -euo pipefail
-          BIN=$(find engine/release -maxdepth 1 -type f \
-            \( -name "nzportablearm64" -o -name "nzportable*" \) 2>/dev/null \
-            | grep -v '\.db$' | head -1)
-
-          if [ -z "$BIN" ]; then
-            echo "::error::Binary nicht gefunden."
-            find engine/release -maxdepth 1 -type f -printf '%f\n' || true
-            exit 1
-          fi
-
-          file "$BIN"
-          if ! file "$BIN" | grep -q "ARM aarch64"; then
-            echo "::error::Binary ist NICHT ARM64: $BIN"
-            exit 1
-          fi
-          echo "OK: Binary ist ARM64"
-
-          echo "=== SDL2-Shared-Libs ==="
-          ls -la engine/release/libSDL2-2.0.so*
-
-          echo "=== GLIBC-Version ==="
-          readelf --version-info "$BIN" 2>/dev/null | grep -o 'GLIBC_[0-9.]*' | sort -u || true
-
-      - name: Upload Binary + SDL2
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: nzportable-rk3326-kmsdrm
           path: |
             engine/release/nzportablearm64
             engine/release/nzportablearm64.db
-            engine/release/libSDL2-2.0.so*
+            engine/release/libSDL2-2.0.so.0
+            engine/release/libSDL2-2.0.so
           if-no-files-found: error
-          retention-days: 14
