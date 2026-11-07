@@ -41,20 +41,29 @@ jobs:
           lines = path.read_text().splitlines()
           order = ["gl_vidsdl.o", "gl_videgl.o", "in_sdl.o", "sys_sdl.o"]
 
-          for i, line in enumerate(lines):
-              line = line.replace("gl_vidlinuxglx.o", "gl_vidsdl.o")
+          # 1) gl_vidlinuxglx.o global ersetzen (GL_OBJS, GLCL_OBJS, alle Targets)
+          lines = [line.replace("gl_vidlinuxglx.o", "gl_vidsdl.o") for line in lines]
 
+          # 2) Alle GLCL_OBJS=-Zeilen bereinigen und Zielobjekte anhängen
+          for i, line in enumerate(lines):
               if line.startswith("GLCL_OBJS=") and "$(GL_OBJS)" in line:
                   prefix, rest = line.split("=", 1)
                   tokens = rest.split()
                   tokens = [x for x in tokens if x not in order]
                   tokens.extend(order)
-                  line = prefix + "=" + " ".join(tokens)
-                  print(f"GLCL_OBJS[{i+1}]={line}")
+                  lines[i] = prefix + "=" + " ".join(tokens)
+                  print(f"GLCL_OBJS[{i+1}] gepatcht: {lines[i]}")
 
-              lines[i] = line
+          # 3) Sicherstellen, dass gl_videgl.o mit -DEGLQUAKE gebaut wird
+          #    (GL_OBJS-Compile-Regel bekommt -DEGLQUAKE über GLCFLAGS)
+          for i, line in enumerate(lines):
+              if "GLCFLAGS=" in line or "GL_CFLAGS=" in line:
+                  if "EGLQUAKE" not in line:
+                      lines[i] = line.rstrip() + " -DEGLQUAKE"
+                      print(f"GLCFLAGS[{i+1}] um -DEGLQUAKE erweitert")
 
           path.write_text("\n".join(lines) + "\n")
+          print("Makefile-Patch abgeschlossen.")
           PYEOF
 
           cat > "$RUNNER_TEMP/nzp-build/patch_kmsdrm.py" << 'PYEOF'
@@ -114,21 +123,16 @@ jobs:
           } > /etc/apt/sources.list.d/arm64-ports.list
 
           apt-get update
-
           apt-get install -y --no-install-recommends \
-            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-            binutils-aarch64-linux-gnu \
+            gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu \
             build-essential make git pkg-config wget ca-certificates python3
 
           git config --global --add safe.directory /workspace
 
           apt-get install -y --no-install-recommends \
-            libdrm-dev:arm64 libgbm-dev:arm64 \
-            libgles2-mesa-dev:arm64 libegl1-mesa-dev:arm64 \
-            libasound2-dev:arm64 zlib1g-dev:arm64 \
-            libpng-dev:arm64 libjpeg-dev:arm64 \
-            libxss-dev:arm64 libxrandr-dev:arm64 \
-            libxi-dev:arm64 libxext-dev:arm64
+            libdrm-dev:arm64 libgbm-dev:arm64 libgles2-mesa-dev:arm64 libegl1-mesa-dev:arm64 \
+            libasound2-dev:arm64 zlib1g-dev:arm64 libpng-dev:arm64 libjpeg-dev:arm64 \
+            libxss-dev:arm64 libxrandr-dev:arm64 libxi-dev:arm64 libxext-dev:arm64
 
           export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
           export PKG_CONFIG_LIBDIR=/usr/local/lib/pkgconfig:/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
@@ -143,44 +147,23 @@ jobs:
 
           CFLAGS="-fPIC -Wno-declaration-after-statement" \
           LDFLAGS="-L/usr/lib/aarch64-linux-gnu" \
-          ./configure --prefix=/usr/local \
-            --host=aarch64-linux-gnu \
-            --enable-video-kmsdrm \
-            --disable-video-x11 \
-            --disable-video-wayland \
-            --disable-video-vulkan \
-            --enable-video-opengles \
-            --enable-shared --disable-static
+          ./configure --prefix=/usr/local --host=aarch64-linux-gnu \
+            --enable-video-kmsdrm --disable-video-x11 --disable-video-wayland \
+            --disable-video-vulkan --enable-video-opengles --enable-shared --disable-static
           make -j"$(nproc)"
           make install
 
-          echo "=== /usr/local/include/SDL2/ (erste 15) ==="
-          ls -la /usr/local/include/SDL2/ | head -15 || true
-
           if [ ! -d /usr/local/include/SDL2 ] || [ -z "$(ls -A /usr/local/include/SDL2 2>/dev/null)" ]; then
-            echo "FATAL: /usr/local/include/SDL2 fehlt oder leer"
-            exit 1
+            echo "FATAL: /usr/local/include/SDL2 fehlt oder leer"; exit 1
           fi
 
           for f in /usr/local/lib/libSDL2-2.0.so.0 /usr/local/lib/libSDL2-2.0.so; do
             [ -e "$f" ] && ln -sf "$f" /usr/local/lib/libSDL2.so && break
           done
-          ls -la /usr/local/lib/libSDL2* || true
-
-          echo "=== sdl2-config --libs ==="
-          /usr/local/bin/sdl2-config --libs || true
-          echo "=== pkg-config sdl2 ==="
-          /usr/bin/aarch64-linux-gnu-pkg-config --cflags --libs sdl2 || true
 
           cd /workspace/engine
-
-          export CC=aarch64-linux-gnu-gcc
-          export CXX=aarch64-linux-gnu-g++
-          export AR=aarch64-linux-gnu-ar
-          export RANLIB=aarch64-linux-gnu-ranlib
-          export STRIP=aarch64-linux-gnu-strip
+          export CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ AR=aarch64-linux-gnu-ar RANLIB=aarch64-linux-gnu-ranlib STRIP=aarch64-linux-gnu-strip
           export PKGCONFIG=/usr/bin/aarch64-linux-gnu-pkg-config
-
           export SDLCONFIG=/usr/local/bin/sdl2-config
           export SDLLIBS="-L/usr/local/lib -lSDL2"
           export SDLCFLAGS="-I/usr/local/include/SDL2 -D_REENTRANT -DUSE_SDL=2 -DEGLQUAKE"
@@ -194,64 +177,55 @@ jobs:
           cp -r /usr/local/include/SDL2/. libs-aarch64-linux-gnu/
           cp -r /usr/local/include/SDL2/. libs-aarch64-linux-gnu/SDL2/
 
-          echo "=== Verifikation Header-Kopie ==="
-          ls -la libs-aarch64-linux-gnu/SDL.h libs-aarch64-linux-gnu/SDL2/SDL.h
-
-          echo "=== Makefile patchen: GL_OBJS + alle GLCL_OBJS ==="
+          echo "=== Makefile patchen ==="
           python3 /tmp/patch_makefile.py /workspace/engine/Makefile
 
-          echo "=== GL_OBJS-Zeile nach Patch ==="
-          grep -n "^GL_OBJS=" /workspace/engine/Makefile | head -5 || true
-          echo "=== gl_vidlinuxglx.o darf nicht mehr vorkommen ==="
-          grep -n "gl_vidlinuxglx.o" /workspace/engine/Makefile || true
-          echo "=== GLCL_OBJS-Zeilen nach Patch ==="
-          grep -n "^GLCL_OBJS=" /workspace/engine/Makefile | head -5
+          echo "=== Verifikation: gl_vidlinuxglx.o darf nicht mehr vorkommen ==="
+          if grep -n "gl_vidlinuxglx.o" /workspace/engine/Makefile; then
+            echo "FATAL: gl_vidlinuxglx.o ist noch im Makefile!"; exit 1
+          fi
+          echo "OK: gl_vidlinuxglx.o vollständig ersetzt."
+
+          echo "=== Alle GLCL_OBJS-Zeilen nach Patch ==="
+          grep -n "^GLCL_OBJS=" /workspace/engine/Makefile
+
+          echo "=== Verifikation: gl_videgl.o in allen relevanten GLCL_OBJS ==="
+          MISSING=0
+          while IFS= read -r l; do
+            echo "$l" | grep -q "gl_videgl.o" || { echo "FEHLT gl_videgl.o in: $l"; MISSING=1; }
+            echo "$l" | grep -q "gl_vidsdl.o" || { echo "FEHLT gl_vidsdl.o in: $l"; MISSING=1; }
+          done < <(grep "^GLCL_OBJS=" /workspace/engine/Makefile)
+          [ "$MISSING" -eq 0 ] || { echo "FATAL: GLCL_OBJS unvollständig"; exit 1; }
+          echo "OK: Alle GLCL_OBJS enthalten gl_vidsdl.o und gl_videgl.o."
 
           echo "=== Dependencies bauen (makelibs) ==="
           time make makelibs FTE_TARGET=linux_arm64
 
-          echo "=== Engine-Objekte alt löschen ==="
+          echo "=== Engine-Objekte löschen ==="
           rm -rf /workspace/engine/release/m_linuxarm64
 
-          echo "=== Engine cross-kompilieren (RK3326, KMSDRM, SDL2) ==="
+          echo "=== Engine cross-kompilieren ==="
           set +e
-          time make m-rel \
-            FTE_TARGET=linux_arm64 \
-            FTE_CONFIG=nzportable \
-            USE_SDL=2 \
-            SDL=2 \
-            NO_X11=1 \
-            CC="${CC}" \
-            CXX="${CXX}" \
-            PKGCONFIG="${PKGCONFIG}" \
-            SDLCONFIG="${SDLCONFIG}" \
-            SDLLIBS="${SDLLIBS}" \
-            SDLCFLAGS="${SDLCFLAGS}" \
+          time make m-rel FTE_TARGET=linux_arm64 FTE_CONFIG=nzportable USE_SDL=2 SDL=2 NO_X11=1 \
+            CC="${CC}" CXX="${CXX}" PKGCONFIG="${PKGCONFIG}" \
+            SDLCONFIG="${SDLCONFIG}" SDLLIBS="${SDLLIBS}" SDLCFLAGS="${SDLCFLAGS}" \
             CPUOPTIMIZATIONS="${OPT_FLAGS}" \
-            LDFLAGS="-L/usr/local/lib -Wl,-rpath-link,/usr/local/lib -lSDL2" \
-            -j"$(nproc)"
+            LDFLAGS="-L/usr/local/lib -Wl,-rpath-link,/usr/local/lib -lSDL2" -j"$(nproc)"
           BUILD_RC=$?
           set -e
 
           if [ "$BUILD_RC" -ne 0 ]; then
-            echo "=== LINK FEHLGESCHLAGEN (RC=$BUILD_RC) — Objekt-/nm-Diagnose ==="
-            echo "--- gefundene Objekte ---"
-            find /workspace/engine \( -name 'gl_vidsdl.o' -o -name 'gl_videgl.o' -o -name 'in_sdl.o' -o -name 'sys_sdl.o' \) -print 2>/dev/null || true
-
-            while IFS= read -r f; do
+            echo "=== LINK FEHLGESCHLAGEN (RC=$BUILD_RC) — Diagnose ==="
+            echo "--- Vorhandene Videobjekte ---"
+            find /workspace/engine \( -name 'gl_vidsdl.o' -o -name 'gl_videgl.o' -o -name 'in_sdl.o' -o -name 'sys_sdl.o' \) -print 2>/dev/null
+            for f in $(find /workspace/engine \( -name 'gl_vidsdl.o' -o -name 'gl_videgl.o' \) -print 2>/dev/null); do
               echo "--- $f ---"
-              aarch64-linux-gnu-nm "$f" 2>/dev/null | grep -E "GLVID_|eglrendererinfo|INS_|Sys_SendKeyEvents" || echo "(keine passenden Symbole)"
-            done < <(find /workspace/engine \( -name 'gl_vidsdl.o' -o -name 'gl_videgl.o' -o -name 'in_sdl.o' -o -name 'sys_sdl.o' \) -print 2>/dev/null)
-
+              aarch64-linux-gnu-nm "$f" 2>/dev/null | grep -E "GLVID_|eglrendererinfo" || echo "(keine Treffer)"
+            done
             echo "--- gl_vidcommon.o Referenzen ---"
-            aarch64-linux-gnu-nm /workspace/engine/release/m_linuxarm64/gl_vidcommon.o 2>/dev/null | grep -E "GLVID_" || true
-
-            echo "--- Makefile: Regel für gl_vidsdl.o ---"
-            grep -n "gl_vidsdl" /workspace/engine/Makefile | head -20 || true
-
-            echo "--- Makefile: USE_SDL / SDL Variablen ---"
-            grep -n "USE_SDL\|^SDL\b\|SDL=" /workspace/engine/Makefile | head -30 || true
-
+            aarch64-linux-gnu-nm /workspace/engine/release/m_linuxarm64/gl_vidcommon.o 2>/dev/null | grep -E "GLVID_|eglrendererinfo" || true
+            echo "--- Kompilierzeile für gl_videgl.o suchen ---"
+            grep -n "gl_videgl" /workspace/engine/Makefile | head -10
             exit 1
           fi
 
@@ -260,7 +234,6 @@ jobs:
           cp -a /usr/local/lib/libSDL2.so  /workspace/engine/release/ || true
           cd /workspace/engine/release
           ln -sf libSDL2-2.0.so.0 libSDL2-2.0.so || true
-
           echo "=== Patch-Marker in libSDL2-2.0.so.0 ==="
           strings libSDL2-2.0.so.0 | grep "NZP-M9" || echo "WARNUNG: Patch-Marker nicht gefunden!"
           BUILDEOF
