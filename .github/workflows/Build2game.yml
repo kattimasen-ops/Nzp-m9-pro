@@ -30,18 +30,15 @@ jobs:
           import sys, pathlib
           p = pathlib.Path(sys.argv[1])
           text = p.read_text()
-          marker = "pbool PDECL PR_SSQC_CheckHeaderCrc"
           if "NZP-M9: CRC check disabled" in text:
-              print("already patched")
-              sys.exit(0)
+              print("already patched"); sys.exit(0)
+          marker = "pbool PDECL PR_SSQC_CheckHeaderCrc"
           idx = text.find(marker)
           if idx < 0:
-              print("ERROR: PR_SSQC_CheckHeaderCrc not found")
-              sys.exit(1)
+              print("ERROR: marker not found"); sys.exit(1)
           brace = text.find("{", idx)
           if brace < 0:
-              print("ERROR: opening brace not found")
-              sys.exit(1)
+              print("ERROR: brace not found"); sys.exit(1)
           text = text[:brace+1] + "\n    return true; /* NZP-M9: CRC check disabled */" + text[brace+1:]
           p.write_text(text)
           print("pr_cmds.c patched")
@@ -56,12 +53,15 @@ jobs:
           for i, line in enumerate(lines):
               s = line.lstrip()
               indent = line[:len(line)-len(s)]
-              if s.startswith("MCL_OBJS=") and "$(SOFTWARE_OBJS)" in line:
+              if s.startswith("MCL_OBJS=") and "gl_vidwayland.o" in line:
                   lines[i] = indent + "MCL_OBJS=$(D3DGL_OBJS) $(GLQUAKE_OBJS) $(SOFTWARE_OBJS) gl_vidsdl.o gl_videgl.o snd_sdl.o cd_sdl.o sys_sdl.o in_sdl.o sys_linux_threads.o"
-              elif s.startswith("GLCL_OBJS=") and "gl_vidsdl.o gl_vidwayland.o" in line:
+                  print(f"MCL_OBJS[{i+1}] -> SDL-only")
+              elif s.startswith("GLCL_OBJS=") and "gl_vidwayland.o" in line:
                   lines[i] = indent + "GLCL_OBJS=$(GL_OBJS) $(D3DGL_OBJS) $(GLQUAKE_OBJS) gl_vidsdl.o gl_videgl.o snd_sdl.o cd_sdl.o sys_sdl.o in_sdl.o sys_linux_threads.o"
-              elif s.startswith("M_CFLAGS=") and "CLIENTLIBFLAGS" in line and "-DEGLQUAKE" not in line:
-                  lines[i] = line.rstrip() + " -DEGLQUAKE"
+                  print(f"GLCL_OBJS[{i+1}] -> SDL-only")
+              elif s.startswith("M_CFLAGS=") and "$(CLIENTLIBFLAGS)" in line and "-DEGLQUAKE" not in line:
+                  lines[i] = line.rstrip() + " -DUSE_EGL -DEGLQUAKE -DFTE_SDL"
+                  print(f"M_CFLAGS[{i+1}] += -DUSE_EGL -DEGLQUAKE -DFTE_SDL")
           p.write_text("\n".join(lines) + "\n")
           print("Makefile patched")
           PYEOF
@@ -71,10 +71,9 @@ jobs:
           p = pathlib.Path(sys.argv[1])
           text = p.read_text()
           if "GLVID_GetRGBInfo" in text:
-              print("already present")
-              sys.exit(0)
+              print("already present"); sys.exit(0)
           stub = (
-              "\n/* NZP-M9: GLVID_GetRGBInfo stub for gl_vidcommon.o and gl_videgl.o */\n"
+              "\n/* NZP-M9: GLVID_GetRGBInfo stub for gl_vidcommon.o / gl_videgl.o */\n"
               "char *GLVID_GetRGBInfo(int *tw, int *th, enum uploadfmt *fmt)\n"
               "{\n"
               "    if (tw) *tw = 0;\n"
@@ -95,12 +94,10 @@ jobs:
               pattern = re.compile(r"(window->driverdata\s*=\s*windata\s*;)", re.DOTALL)
               m = pattern.search(t)
               if m:
-                  insert = (
-                      "    /* NZP-M9-KMSDRM-WINDOW-FLAG */\n"
-                      "    if (!(window->flags & SDL_WINDOW_VULKAN)) {\n"
-                      "        window->flags |= SDL_WINDOW_OPENGL;\n"
-                      "    }\n\n"
-                  )
+                  insert = ("    /* NZP-M9-KMSDRM-WINDOW-FLAG */\n"
+                            "    if (!(window->flags & SDL_WINDOW_VULKAN)) {\n"
+                            "        window->flags |= SDL_WINDOW_OPENGL;\n"
+                            "    }\n\n")
                   t = t[:m.start()] + insert + t[m.start():]
                   path.write_text(t)
                   print("OK: KMSDRM Window-Flag Patch angewendet.")
@@ -109,15 +106,13 @@ jobs:
               pattern = re.compile(r"(KMSDRM_drmModePageFlip\s*\([^;]+;)", re.DOTALL)
               m = pattern.search(t)
               if m:
-                  fallback = (
-                      "\n    /* NZP-M9-PAGEFLIP-FALLBACK */\n"
-                      "    if (ret != 0 && (flip_flags & DRM_MODE_PAGE_FLIP_ASYNC)) {\n"
-                      "        SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO, \"Async pageflip rejected; using synchronous flips.\");\n"
-                      "        viddata->async_pageflip_support = SDL_FALSE;\n"
-                      "        flip_flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;\n"
-                      "        ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id, fb_info->fb_id, flip_flags, &windata->waiting_for_flip);\n"
-                      "    }\n"
-                  )
+                  fallback = ("\n    /* NZP-M9-PAGEFLIP-FALLBACK */\n"
+                              "    if (ret != 0 && (flip_flags & DRM_MODE_PAGE_FLIP_ASYNC)) {\n"
+                              "        SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO, \"Async pageflip rejected; using synchronous flips.\");\n"
+                              "        viddata->async_pageflip_support = SDL_FALSE;\n"
+                              "        flip_flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;\n"
+                              "        ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id, fb_info->fb_id, flip_flags, &windata->waiting_for_flip);\n"
+                              "    }\n")
                   t = t[:m.end()] + fallback + t[m.end():]
                   path.write_text(t)
                   print("OK: Pageflip-Fallback eingefügt.")
@@ -148,6 +143,11 @@ jobs:
             libasound2-dev:arm64 zlib1g-dev:arm64 libpng-dev:arm64 libjpeg-dev:arm64 \
             libxss-dev:arm64 libxrandr-dev:arm64 libxi-dev:arm64 libxext-dev:arm64
 
+          # Trick fuer Makefile-Wildcard-Check: leere amd64-Datei. Compiler nutzt spaeter
+          # /usr/aarch64-linux-gnu/include/EGL/egl.h (echte arm64-Header).
+          mkdir -p /usr/include/EGL
+          [ -f /usr/include/EGL/egl.h ] || touch /usr/include/EGL/egl.h
+
           export PKG_CONFIG_PATH=/usr/local/lib/pkgconfig:/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
           export PKG_CONFIG_LIBDIR=/usr/local/lib/pkgconfig:/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
           export PKG_CONFIG_SYSROOT_DIR=/
@@ -177,13 +177,25 @@ jobs:
 
           cd /workspace/engine
 
+          echo "=== zlib-1.3.1 manuell von GitHub laden ==="
+          rm -f zlib-1.3.1.tar.gz
+          wget -q -O zlib-1.3.1.tar.gz \
+            "https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz"
+          gzip -t zlib-1.3.1.tar.gz || { echo "FATAL: zlib tarball kein gzip"; exit 1; }
+          ls -la zlib-1.3.1.tar.gz
+
           echo "=== Patch pr_cmds.c ==="
           python3 /tmp/patch_prcmds.py /workspace/engine/server/pr_cmds.c
 
           echo "=== Patch Makefile ==="
           python3 /tmp/patch_makefile.py /workspace/engine/Makefile
-          grep -n "^MCL_OBJS=" /workspace/engine/Makefile | head -3
-          grep -n "^M_CFLAGS=" /workspace/engine/Makefile | head -3
+          echo "--- MCL_OBJS (Linux) ---"
+          grep -n "^[[:space:]]*MCL_OBJS=.*gl_vidwayland" /workspace/engine/Makefile || true
+          echo "--- GLCL_OBJS (Linux) ---"
+          grep -n "^[[:space:]]*GLCL_OBJS=.*gl_vidwayland" /workspace/engine/Makefile || true
+          echo "--- M_CFLAGS ---"
+          grep -n "^M_CFLAGS=.*DEGLQUAKE" /workspace/engine/Makefile | head -3 || true
+          echo "--- gl_vidlinuxglx.o Reste ---"
           grep -n "gl_vidlinuxglx.o" /workspace/engine/Makefile || echo "OK: keine Reste"
 
           echo "=== Patch gl_vidsdl.c ==="
@@ -194,12 +206,12 @@ jobs:
           export PKGCONFIG=/usr/bin/aarch64-linux-gnu-pkg-config
           export SDLCONFIG=/usr/local/bin/sdl2-config
           export SDLLIBS="-L/usr/local/lib -lSDL2"
-          export SDLCFLAGS="-I/usr/local/include/SDL2 -D_REENTRANT -DUSE_SDL=2 -DEGLQUAKE"
+          export SDLCFLAGS="-I/usr/local/include/SDL2 -D_REENTRANT -DUSE_SDL=2 -DEGLQUAKE -DUSE_EGL -DFTE_SDL"
 
           OPT_FLAGS="-O3 -mcpu=cortex-a35 -mtune=cortex-a35 \
             -funsafe-math-optimizations -fno-math-errno \
             -fno-trapping-math -fomit-frame-pointer -funroll-loops -pipe \
-            -DNO_X11 -DUSE_SDL=2 -DEGLQUAKE"
+            -DNO_X11 -DUSE_SDL=2 -DEGLQUAKE -DUSE_EGL -DFTE_SDL"
 
           mkdir -p libs-aarch64-linux-gnu/SDL2
           cp -r /usr/local/include/SDL2/. libs-aarch64-linux-gnu/
@@ -226,7 +238,7 @@ jobs:
             find /workspace/engine \( -name 'gl_vidsdl.o' -o -name 'gl_videgl.o' -o -name 'in_sdl.o' -o -name 'sys_sdl.o' \) -print 2>/dev/null
             for f in $(find /workspace/engine \( -name 'gl_videgl.o' -o -name 'in_sdl.o' -o -name 'sys_sdl.o' \) -print 2>/dev/null); do
               echo "--- $f ---"
-              aarch64-linux-gnu-nm "$f" 2>/dev/null | grep -E "eglrendererinfo|INS_|Sys_SendKeyEvents" || echo "(keine Treffer)"
+              aarch64-linux-gnu-nm "$f" 2>/dev/null | grep -E "eglrendererinfo|INS_|Sys_SendKeyEvents|GLVID_" || echo "(keine Treffer)"
             done
             exit 1
           fi
@@ -238,6 +250,9 @@ jobs:
           ln -sf libSDL2-2.0.so.0 libSDL2-2.0.so || true
           echo "=== Patch-Marker in libSDL2-2.0.so.0 ==="
           strings libSDL2-2.0.so.0 | grep "NZP-M9" || echo "WARNUNG: Patch-Marker nicht gefunden!"
+
+          echo "=== Fertig ==="
+          ls -la nzportablearm64* libSDL2-2.0.so* 2>/dev/null || true
           BUILDEOF
 
       - name: Cross-Compile in ubuntu:20.04
