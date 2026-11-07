@@ -21,85 +21,82 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Patch pr_cmds.c (CRC-Check deaktivieren)
-        run: |
-          set -euo pipefail
-          PR_CMDS=$(find . -path "*/engine/server/pr_cmds.c" | head -n 1)
-          [ -n "$PR_CMDS" ] || { echo "FEHLER: pr_cmds.c nicht gefunden"; exit 1; }
-          sed -i '/pbool PDECL PR_SSQC_CheckHeaderCrc/{n;s/{/{\n    return true; \/\/ NZP-M9: CRC check disabled/;}' "$PR_CMDS"
-          grep -A2 -n "PR_SSQC_CheckHeaderCrc" "$PR_CMDS" | head -5 || true
-
-      - name: Patch engine/Makefile (Linux auf SDL umstellen)
-        run: |
-          set -euo pipefail
-          M=engine/Makefile
-
-          # 1. gl_vidlinuxglx.o -> gl_vidsdl.o
-          sed -i 's/gl_vidlinuxglx\.o/gl_vidsdl.o/g' "$M"
-
-          # 2. Linux-MCL_OBJS auf reine SDL-Objekte umstellen
-          sed -i -E 's|^([[:space:]]*)MCL_OBJS=\$\(D3DGL_OBJS\) \$\(GLQUAKE_OBJS\) \$\(SOFTWARE_OBJS\) gl_vidsdl\.o gl_vidwayland\.o gl_videgl\.o .*$|\1MCL_OBJS=$(D3DGL_OBJS) $(GLQUAKE_OBJS) $(SOFTWARE_OBJS) gl_vidsdl.o gl_videgl.o snd_sdl.o cd_sdl.o sys_sdl.o in_sdl.o sys_linux_threads.o|' "$M"
-
-          # 3. Linux-GLCL_OBJS ebenfalls auf SDL-Objekte
-          sed -i -E 's|^([[:space:]]*)GLCL_OBJS=\$\(GL_OBJS\) \$\(D3DGL_OBJS\) \$\(GLQUAKE_OBJS\) gl_vidsdl\.o gl_vidwayland\.o gl_videgl\.o .*$|\1GLCL_OBJS=$(GL_OBJS) $(D3DGL_OBJS) $(GLQUAKE_OBJS) gl_vidsdl.o gl_videgl.o snd_sdl.o cd_sdl.o sys_sdl.o in_sdl.o sys_linux_threads.o|' "$M"
-
-          # 4. Linux-M_CFLAGS um -DEGLQUAKE erweitern (nur die Linux-Variante)
-          sed -i 's|^M_CFLAGS=\$(VKCFLAGS) \$(GL_CFLAGS) \$(CLIENTLIBFLAGS)$|M_CFLAGS=$(VKCFLAGS) $(GL_CFLAGS) $(CLIENTLIBFLAGS) -DEGLQUAKE|' "$M"
-
-          echo "=== GL_OBJS mit gl_vidsdl ==="
-          grep -n "^GL_OBJS=" "$M" | head -3
-          echo "=== GLCL_OBJS Linux-Zeilen ==="
-          grep -n "^GLCL_OBJS=" "$M" | head -5
-          echo "=== MCL_OBJS Linux-Zeilen ==="
-          grep -n "^MCL_OBJS=" "$M" | head -5
-          echo "=== M_CFLAGS Zeilen ==="
-          grep -n "^M_CFLAGS=" "$M" | head -5
-          echo "=== gl_vidlinuxglx.o Reste ==="
-          grep -n "gl_vidlinuxglx.o" "$M" || echo "OK: keine Reste"
-
-      - name: Patch gl_vidsdl.c (GLVID_GetRGBInfo als Stub)
-        run: |
-          set -euo pipefail
-          F=engine/gl/gl_vidsdl.c
-          # Alten (nicht linkenden) Patch-Block entfernen, falls vorhanden
-          sed -i '/NZP-M9: GLVID_GetRGBInfo/,$d' "$F"
-          if ! grep -q "GLVID_GetRGBInfo" "$F"; then
-            cat >> "$F" << 'STUB'
-/* NZP-M9: GLVID_GetRGBInfo stub (used by gl_vidcommon.o / gl_videgl.o)
- * Real implementation uses dynamically-loaded GL function pointers
- * that are not available in gl_vidsdl.c. Returning NULL is safe;
- * NZP gameplay does not use the screenshot path. */
-char *GLVID_GetRGBInfo(int *tw, int *th, enum uploadfmt *fmt)
-{
-    if (tw) *tw = 0;
-    if (th) *th = 0;
-    if (fmt) *fmt = PTI_RGBX8;
-    return 0;
-}
-STUB
-            echo "OK: GLVID_GetRGBInfo Stub eingefuegt."
-          else
-            echo "GLVID_GetRGBInfo bereits vorhanden."
-          fi
-          echo "=== Verifikation ==="
-          grep -n "GLVID_GetRGBInfo" "$F" | head -5
-
-      - name: Patch-Scripts auf Host schreiben
+      - name: Write patch scripts to host
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/nzp-build"
+
+          cat > "$RUNNER_TEMP/nzp-build/patch_prcmds.py" << 'PYEOF'
+          import sys, pathlib
+          p = pathlib.Path(sys.argv[1])
+          text = p.read_text()
+          marker = "pbool PDECL PR_SSQC_CheckHeaderCrc"
+          if "NZP-M9: CRC check disabled" in text:
+              print("already patched")
+              sys.exit(0)
+          idx = text.find(marker)
+          if idx < 0:
+              print("ERROR: PR_SSQC_CheckHeaderCrc not found")
+              sys.exit(1)
+          brace = text.find("{", idx)
+          if brace < 0:
+              print("ERROR: opening brace not found")
+              sys.exit(1)
+          text = text[:brace+1] + "\n    return true; /* NZP-M9: CRC check disabled */" + text[brace+1:]
+          p.write_text(text)
+          print("pr_cmds.c patched")
+          PYEOF
+
+          cat > "$RUNNER_TEMP/nzp-build/patch_makefile.py" << 'PYEOF'
+          import sys, pathlib
+          p = pathlib.Path(sys.argv[1])
+          text = p.read_text()
+          text = text.replace("gl_vidlinuxglx.o", "gl_vidsdl.o")
+          lines = text.splitlines()
+          for i, line in enumerate(lines):
+              s = line.lstrip()
+              indent = line[:len(line)-len(s)]
+              if s.startswith("MCL_OBJS=") and "$(SOFTWARE_OBJS)" in line:
+                  lines[i] = indent + "MCL_OBJS=$(D3DGL_OBJS) $(GLQUAKE_OBJS) $(SOFTWARE_OBJS) gl_vidsdl.o gl_videgl.o snd_sdl.o cd_sdl.o sys_sdl.o in_sdl.o sys_linux_threads.o"
+              elif s.startswith("GLCL_OBJS=") and "gl_vidsdl.o gl_vidwayland.o" in line:
+                  lines[i] = indent + "GLCL_OBJS=$(GL_OBJS) $(D3DGL_OBJS) $(GLQUAKE_OBJS) gl_vidsdl.o gl_videgl.o snd_sdl.o cd_sdl.o sys_sdl.o in_sdl.o sys_linux_threads.o"
+              elif s.startswith("M_CFLAGS=") and "CLIENTLIBFLAGS" in line and "-DEGLQUAKE" not in line:
+                  lines[i] = line.rstrip() + " -DEGLQUAKE"
+          p.write_text("\n".join(lines) + "\n")
+          print("Makefile patched")
+          PYEOF
+
+          cat > "$RUNNER_TEMP/nzp-build/patch_glvidsdl.py" << 'PYEOF'
+          import sys, pathlib
+          p = pathlib.Path(sys.argv[1])
+          text = p.read_text()
+          if "GLVID_GetRGBInfo" in text:
+              print("already present")
+              sys.exit(0)
+          stub = (
+              "\n/* NZP-M9: GLVID_GetRGBInfo stub for gl_vidcommon.o and gl_videgl.o */\n"
+              "char *GLVID_GetRGBInfo(int *tw, int *th, enum uploadfmt *fmt)\n"
+              "{\n"
+              "    if (tw) *tw = 0;\n"
+              "    if (th) *th = 0;\n"
+              "    if (fmt) *fmt = PTI_RGBX8;\n"
+              "    return 0;\n"
+              "}\n"
+          )
+          p.write_text(text + stub)
+          print("GLVID_GetRGBInfo stub added")
+          PYEOF
 
           cat > "$RUNNER_TEMP/nzp-build/patch_kmsdrm.py" << 'PYEOF'
           import sys, re, pathlib
           path = pathlib.Path(sys.argv[1] + "/src/video/kmsdrm/SDL_kmsdrmvideo.c")
           t = path.read_text()
-          marker = "NZP-M9-KMSDRM-WINDOW-FLAG"
-          if marker not in t:
+          if "NZP-M9-KMSDRM-WINDOW-FLAG" not in t:
               pattern = re.compile(r"(window->driverdata\s*=\s*windata\s*;)", re.DOTALL)
               m = pattern.search(t)
               if m:
                   insert = (
-                      "    /* " + marker + " */\n"
+                      "    /* NZP-M9-KMSDRM-WINDOW-FLAG */\n"
                       "    if (!(window->flags & SDL_WINDOW_VULKAN)) {\n"
                       "        window->flags |= SDL_WINDOW_OPENGL;\n"
                       "    }\n\n"
@@ -108,13 +105,12 @@ STUB
                   path.write_text(t)
                   print("OK: KMSDRM Window-Flag Patch angewendet.")
           t = path.read_text()
-          marker2 = "NZP-M9-PAGEFLIP-FALLBACK"
-          if marker2 not in t:
+          if "NZP-M9-PAGEFLIP-FALLBACK" not in t:
               pattern = re.compile(r"(KMSDRM_drmModePageFlip\s*\([^;]+;)", re.DOTALL)
               m = pattern.search(t)
               if m:
                   fallback = (
-                      "\n    /* " + marker2 + " */\n"
+                      "\n    /* NZP-M9-PAGEFLIP-FALLBACK */\n"
                       "    if (ret != 0 && (flip_flags & DRM_MODE_PAGE_FLIP_ASYNC)) {\n"
                       "        SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO, \"Async pageflip rejected; using synchronous flips.\");\n"
                       "        viddata->async_pageflip_support = SDL_FALSE;\n"
@@ -180,6 +176,20 @@ STUB
           done
 
           cd /workspace/engine
+
+          echo "=== Patch pr_cmds.c ==="
+          python3 /tmp/patch_prcmds.py /workspace/engine/server/pr_cmds.c
+
+          echo "=== Patch Makefile ==="
+          python3 /tmp/patch_makefile.py /workspace/engine/Makefile
+          grep -n "^MCL_OBJS=" /workspace/engine/Makefile | head -3
+          grep -n "^M_CFLAGS=" /workspace/engine/Makefile | head -3
+          grep -n "gl_vidlinuxglx.o" /workspace/engine/Makefile || echo "OK: keine Reste"
+
+          echo "=== Patch gl_vidsdl.c ==="
+          python3 /tmp/patch_glvidsdl.py /workspace/engine/gl/gl_vidsdl.c
+          grep -n "GLVID_GetRGBInfo" /workspace/engine/gl/gl_vidsdl.c | head -3
+
           export CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ AR=aarch64-linux-gnu-ar RANLIB=aarch64-linux-gnu-ranlib STRIP=aarch64-linux-gnu-strip
           export PKGCONFIG=/usr/bin/aarch64-linux-gnu-pkg-config
           export SDLCONFIG=/usr/local/bin/sdl2-config
@@ -195,7 +205,7 @@ STUB
           cp -r /usr/local/include/SDL2/. libs-aarch64-linux-gnu/
           cp -r /usr/local/include/SDL2/. libs-aarch64-linux-gnu/SDL2/
 
-          echo "=== Dependencies bauen (makelibs) ==="
+          echo "=== makelibs ==="
           time make makelibs FTE_TARGET=linux_arm64
 
           echo "=== Engine-Objekte löschen ==="
@@ -212,8 +222,7 @@ STUB
           set -e
 
           if [ "$BUILD_RC" -ne 0 ]; then
-            echo "=== LINK FEHLGESCHLAGEN (RC=$BUILD_RC) — Diagnose ==="
-            echo "--- Vorhandene SDL-Objekte ---"
+            echo "=== LINK FEHLGESCHLAGEN (RC=$BUILD_RC) ==="
             find /workspace/engine \( -name 'gl_vidsdl.o' -o -name 'gl_videgl.o' -o -name 'in_sdl.o' -o -name 'sys_sdl.o' \) -print 2>/dev/null
             for f in $(find /workspace/engine \( -name 'gl_videgl.o' -o -name 'in_sdl.o' -o -name 'sys_sdl.o' \) -print 2>/dev/null); do
               echo "--- $f ---"
@@ -235,6 +244,9 @@ STUB
         run: |
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/workspace" \
+            -v "$RUNNER_TEMP/nzp-build/patch_prcmds.py:/tmp/patch_prcmds.py:ro" \
+            -v "$RUNNER_TEMP/nzp-build/patch_makefile.py:/tmp/patch_makefile.py:ro" \
+            -v "$RUNNER_TEMP/nzp-build/patch_glvidsdl.py:/tmp/patch_glvidsdl.py:ro" \
             -v "$RUNNER_TEMP/nzp-build/patch_kmsdrm.py:/tmp/patch_kmsdrm.py:ro" \
             -v "$RUNNER_TEMP/nzp-build/build.sh:/tmp/build.sh:ro" \
             -w /workspace \
