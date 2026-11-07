@@ -29,43 +29,69 @@ jobs:
           sed -i '/pbool PDECL PR_SSQC_CheckHeaderCrc/{n;s/{/{\n    return true; \/\/ NZP-M9: CRC check disabled/;}' "$PR_CMDS"
           grep -A2 -n "PR_SSQC_CheckHeaderCrc" "$PR_CMDS" | head -5 || true
 
-      - name: Patch-Scripts und Build-Script auf Host schreiben
+      - name: Patch engine/Makefile (gl_vidlinuxglx->gl_vidsdl, GLCFLAGS+EGLQUAKE)
+        run: |
+          set -euo pipefail
+          M=engine/Makefile
+          sed -i 's/gl_vidlinuxglx\.o/gl_vidsdl.o/g' "$M"
+          sed -i 's|^GLCFLAGS?=-DGLQUAKE$|GLCFLAGS?=-DGLQUAKE -DEGLQUAKE|' "$M"
+          echo "=== gl_vidlinuxglx.o Reste ==="
+          grep -n "gl_vidlinuxglx.o" "$M" || echo "OK: keine Reste"
+          echo "=== GLCFLAGS ==="
+          grep -n "^GLCFLAGS" "$M" | head -3
+          echo "=== GLCL_OBJS (Linux, erste 5) ==="
+          grep -n "^GLCL_OBJS=" "$M" | head -5
+
+      - name: Patch gl_vidsdl.c (GLVID_GetRGBInfo stub)
+        run: |
+          set -euo pipefail
+          F=engine/gl/gl_vidsdl.c
+          if grep -q "GLVID_GetRGBInfo" "$F"; then
+            echo "GLVID_GetRGBInfo bereits vorhanden."
+          else
+            echo "" >> "$F"
+            echo "/* NZP-M9: GLVID_GetRGBInfo for gl_vidcommon.o/gl_videgl.o */" >> "$F"
+            echo "#ifdef USE_SDL" >> "$F"
+            echo "char *GLVID_GetRGBInfo(int *tw, int *th, enum uploadfmt *fmt)" >> "$F"
+            echo "{" >> "$F"
+            echo "    int w = vid.width;" >> "$F"
+            echo "    int h = vid.height;" >> "$F"
+            echo "    unsigned char *buf;" >> "$F"
+            echo "    if (w <= 0 || h <= 0) {" >> "$F"
+            echo "        if (tw) *tw = 0;" >> "$F"
+            echo "        if (th) *th = 0;" >> "$F"
+            echo "        if (fmt) *fmt = PTI_RGBX8;" >> "$F"
+            echo "        return 0;" >> "$F"
+            echo "    }" >> "$F"
+            echo "    buf = (unsigned char*)malloc((size_t)w * (size_t)h * 4);" >> "$F"
+            echo "    if (!buf) {" >> "$F"
+            echo "        if (tw) *tw = 0;" >> "$F"
+            echo "        if (th) *th = 0;" >> "$F"
+            echo "        if (fmt) *fmt = PTI_RGBX8;" >> "$F"
+            echo "        return 0;" >> "$F"
+            echo "    }" >> "$F"
+            echo "    glPixelStorei(0x0D05 /* GL_PACK_ALIGNMENT */, 1);" >> "$F"
+            echo "    glReadPixels(0, 0, w, h, 0x1908 /* GL_RGBA */, 0x1401 /* GL_UNSIGNED_BYTE */, buf);" >> "$F"
+            echo "    if (tw) *tw = w;" >> "$F"
+            echo "    if (th) *th = h;" >> "$F"
+            echo "    if (fmt) *fmt = PTI_RGBA8;" >> "$F"
+            echo "    return (char*)buf;" >> "$F"
+            echo "}" >> "$F"
+            echo "#endif" >> "$F"
+            echo "OK: GLVID_GetRGBInfo stub eingefuegt."
+          fi
+          echo "=== Verifikation ==="
+          grep -n "GLVID_GetRGBInfo" "$F" | head -5
+
+      - name: Patch-Scripts auf Host schreiben
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/nzp-build"
 
-          cat > "$RUNNER_TEMP/nzp-build/patch_makefile.py" << 'PYEOF'
-          import sys, pathlib
-
-          path = pathlib.Path(sys.argv[1])
-          lines = path.read_text().splitlines()
-
-          # 1) gl_vidlinuxglx.o überall durch gl_vidsdl.o ersetzen
-          lines = [line.replace("gl_vidlinuxglx.o", "gl_vidsdl.o") for line in lines]
-
-          # 2) GLCFLAGS um -DEGLQUAKE erweitern (für gl_videgl.o)
-          for i, line in enumerate(lines):
-              if line.startswith("GLCFLAGS?=") and "EGLQUAKE" not in line:
-                  lines[i] = line.rstrip() + " -DEGLQUAKE"
-                  print(f"GLCFLAGS[{i+1}] um -DEGLQUAKE erweitert: {lines[i]}")
-
-          # 3) Sicherstellen, dass MCL_OBJS für linux gl_videgl.o enthält
-          for i, line in enumerate(lines):
-              if line.startswith("MCL_OBJS=") and "$(SOFTWARE_OBJS)" in line and "gl_videgl.o" not in line:
-                  prefix, rest = line.split("=", 1)
-                  lines[i] = prefix + "=" + rest + " gl_videgl.o"
-                  print(f"MCL_OBJS[{i+1}] um gl_videgl.o erweitert")
-
-          path.write_text("\n".join(lines) + "\n")
-          print("Makefile-Patch abgeschlossen.")
-          PYEOF
-
           cat > "$RUNNER_TEMP/nzp-build/patch_kmsdrm.py" << 'PYEOF'
           import sys, re, pathlib
-
           path = pathlib.Path(sys.argv[1] + "/src/video/kmsdrm/SDL_kmsdrmvideo.c")
           t = path.read_text()
-
           marker = "NZP-M9-KMSDRM-WINDOW-FLAG"
           if marker not in t:
               pattern = re.compile(r"(window->driverdata\s*=\s*windata\s*;)", re.DOTALL)
@@ -80,9 +106,6 @@ jobs:
                   t = t[:m.start()] + insert + t[m.start():]
                   path.write_text(t)
                   print("OK: KMSDRM Window-Flag Patch angewendet.")
-              else:
-                  print("WARNUNG: window->driverdata = windata; nicht gefunden.")
-
           t = path.read_text()
           marker2 = "NZP-M9-PAGEFLIP-FALLBACK"
           if marker2 not in t:
@@ -101,68 +124,6 @@ jobs:
                   t = t[:m.end()] + fallback + t[m.end():]
                   path.write_text(t)
                   print("OK: Pageflip-Fallback eingefügt.")
-          PYEOF
-
-          cat > "$RUNNER_TEMP/nzp-build/patch_glvidsdl.py" << 'PYEOF'
-          import sys, pathlib
-
-          path = pathlib.Path(sys.argv[1] + "/gl/gl_vidsdl.c")
-          t = path.read_text()
-
-          if "GLVID_GetRGBInfo" not in t:
-              stub = r'''
-
-/* NZP-M9: GLVID_GetRGBInfo wird von gl_vidcommon.o und gl_videgl.o benötigt.
- * gl_vidsdl.c definiert diese Funktion nicht, da sie nur für Screenshots/Video
- * in den X11/Windows-Treibern vorhanden ist. Implementierung via glReadPixels,
- * damit die Funktionalität (Screenshot) erhalten bleibt. */
-#ifdef USE_SDL
-#ifndef GLVID_GetRGBInfo
-char *GLVID_GetRGBInfo(int *truewidth, int *trueheight, enum uploadfmt *fmt)
-{
-    extern int vid_width, vid_height;
-    int w = vid_width;
-    int h = vid_height;
-    unsigned char *buf;
-    int y;
-
-    if (w <= 0 || h <= 0)
-        return NULL;
-
-    buf = (unsigned char *)malloc((size_t)w * (size_t)h * 4);
-    if (!buf)
-        return NULL;
-
-    glPixelStorei(GL_PACK_ALIGNMENT, 1);
-    glReadPixels(0, 0, w, h, GL_RGBA, GL_UNSIGNED_BYTE, buf);
-
-    /* OpenGL liefert von unten nach oben – für Screenshots umdrehen. */
-    {
-        unsigned char *tmp = (unsigned char *)malloc((size_t)w * 4);
-        if (tmp) {
-            for (y = 0; y < h / 2; y++) {
-                unsigned char *a = buf + (size_t)y * w * 4;
-                unsigned char *b = buf + (size_t)(h - 1 - y) * w * 4;
-                memcpy(tmp, a, (size_t)w * 4);
-                memcpy(a, b, (size_t)w * 4);
-                memcpy(b, tmp, (size_t)w * 4);
-            }
-            free(tmp);
-        }
-    }
-
-    if (truewidth) *truewidth = w;
-    if (trueheight) *trueheight = h;
-    if (fmt) *fmt = PTI_RGBA8;
-    return (char *)buf;
-}
-#endif
-#endif
-'''
-              path.write_text(t + stub)
-              print("OK: GLVID_GetRGBInfo in gl_vidsdl.c eingefügt.")
-          else:
-              print("GLVID_GetRGBInfo bereits vorhanden.")
           PYEOF
 
           cat > "$RUNNER_TEMP/nzp-build/build.sh" << 'BUILDEOF'
@@ -233,25 +194,6 @@ char *GLVID_GetRGBInfo(int *truewidth, int *trueheight, enum uploadfmt *fmt)
           cp -r /usr/local/include/SDL2/. libs-aarch64-linux-gnu/
           cp -r /usr/local/include/SDL2/. libs-aarch64-linux-gnu/SDL2/
 
-          echo "=== Patch gl_vidsdl.c: GLVID_GetRGBInfo ==="
-          python3 /tmp/patch_glvidsdl.py /workspace/engine
-          grep -n "GLVID_GetRGBInfo" /workspace/engine/gl/gl_vidsdl.c | head -3
-
-          echo "=== Makefile patchen ==="
-          python3 /tmp/patch_makefile.py /workspace/engine/Makefile
-
-          echo "=== Verifikation: gl_vidlinuxglx.o darf nicht mehr vorkommen ==="
-          if grep -n "gl_vidlinuxglx.o" /workspace/engine/Makefile; then
-            echo "FATAL: gl_vidlinuxglx.o ist noch im Makefile!"; exit 1
-          fi
-          echo "OK: gl_vidlinuxglx.o vollständig ersetzt."
-
-          echo "=== GLCFLAGS-Zeile nach Patch ==="
-          grep -n "^GLCFLAGS" /workspace/engine/Makefile | head -3
-
-          echo "=== MCL_OBJS-Zeilen nach Patch ==="
-          grep -n "^MCL_OBJS=" /workspace/engine/Makefile | head -5
-
           echo "=== Dependencies bauen (makelibs) ==="
           time make makelibs FTE_TARGET=linux_arm64
 
@@ -269,17 +211,12 @@ char *GLVID_GetRGBInfo(int *truewidth, int *trueheight, enum uploadfmt *fmt)
           set -e
 
           if [ "$BUILD_RC" -ne 0 ]; then
-            echo "=== LINK FEHLGESCHLAGEN (RC=$BUILD_RC) — Diagnose ==="
-            echo "--- Vorhandene Videobjekte ---"
+            echo "=== LINK FEHLGESCHLAGEN (RC=$BUILD_RC) ==="
             find /workspace/engine \( -name 'gl_vidsdl.o' -o -name 'gl_videgl.o' \) -print 2>/dev/null
             for f in $(find /workspace/engine \( -name 'gl_vidsdl.o' -o -name 'gl_videgl.o' \) -print 2>/dev/null); do
               echo "--- $f ---"
               aarch64-linux-gnu-nm "$f" 2>/dev/null | grep -E "GLVID_|eglrendererinfo" || echo "(keine Treffer)"
             done
-            echo "--- gl_vidcommon.o Referenzen ---"
-            aarch64-linux-gnu-nm /workspace/engine/release/m_linuxarm64/gl_vidcommon.o 2>/dev/null | grep -E "GLVID_" || true
-            echo "--- gl_vidsdl.c: GLVID_GetRGBInfo ---"
-            grep -n "GLVID_GetRGBInfo" /workspace/engine/gl/gl_vidsdl.c | head -5 || true
             exit 1
           fi
 
@@ -297,8 +234,6 @@ char *GLVID_GetRGBInfo(int *truewidth, int *trueheight, enum uploadfmt *fmt)
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/workspace" \
             -v "$RUNNER_TEMP/nzp-build/patch_kmsdrm.py:/tmp/patch_kmsdrm.py:ro" \
-            -v "$RUNNER_TEMP/nzp-build/patch_makefile.py:/tmp/patch_makefile.py:ro" \
-            -v "$RUNNER_TEMP/nzp-build/patch_glvidsdl.py:/tmp/patch_glvidsdl.py:ro" \
             -v "$RUNNER_TEMP/nzp-build/build.sh:/tmp/build.sh:ro" \
             -w /workspace \
             ubuntu:20.04 bash /tmp/build.sh
