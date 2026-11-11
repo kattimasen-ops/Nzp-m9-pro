@@ -78,53 +78,99 @@ jobs:
           path = pathlib.Path(sys.argv[1] + "/src/video/kmsdrm/SDL_kmsdrmvideo.c")
           text = path.read_text()
 
-          if "NZP_GBM_FORMAT_AUTODETECT" in text:
+          if "NZP_GBM_FORMAT_AUTODETECT_HELPER" in text:
               print("already patched"); sys.exit(0)
 
-          # Match beide Deklarationen zusammen (surface_fmt vor surface_flags)
-          pattern = re.compile(
-              r"(?P<indent>[ \t]*)uint32_t\s+surface_fmt\s*=\s*GBM_FORMAT_ARGB8888\s*;\s*\n"
-              r"(?P=indent)uint32_t\s+surface_flags\s*=\s*GBM_BO_USE_SCANOUT\s*\|\s*GBM_BO_USE_RENDERING\s*;",
+          # 1) Hilfsfunktion VOR KMSDRM_CreateSurfaces einfuegen
+          fn_pattern = re.compile(
+              r"^bool\s*\n?KMSDRM_CreateSurfaces\s*\(\s*SDL_VideoDevice\s*\*\s*_this\s*,\s*SDL_Window\s*\*\s*window\s*\)",
+              re.MULTILINE,
           )
-          m = pattern.search(text)
-          if not m:
-              print("ERROR: surface_fmt/surface_flags block not found in SDL_kmsdrmvideo.c")
-              sys.exit(1)
+          fm = fn_pattern.search(text)
+          if not fm:
+              print("ERROR: KMSDRM_CreateSurfaces definition not found"); sys.exit(1)
 
-          indent = m.group("indent")
-          replacement_lines = [
-              indent + "uint32_t surface_fmt = 0;",
-              indent + "uint32_t surface_flags = GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING;",
-              indent,
-              indent + "/* NZP_GBM_FORMAT_AUTODETECT */",
-              indent + "{",
-              indent + "    static const uint32_t nzp_gbm_formats[] = {",
-              indent + "        GBM_FORMAT_XRGB8888, GBM_FORMAT_ARGB8888,",
-              indent + "        GBM_FORMAT_RGB565,   GBM_FORMAT_BGR565,",
-              indent + "        GBM_FORMAT_XBGR8888, GBM_FORMAT_ABGR8888,",
-              indent + "        GBM_FORMAT_RGBX8888, GBM_FORMAT_RGBA8888,",
-              indent + "        GBM_FORMAT_BGRX8888, GBM_FORMAT_BGRA8888",
-              indent + "    };",
-              indent + "    int nzp_i;",
-              indent + "    for (nzp_i = 0; nzp_i < (int)(sizeof(nzp_gbm_formats)/sizeof(nzp_gbm_formats[0])); nzp_i++) {",
-              indent + "        if (KMSDRM_gbm_device_is_format_supported(viddata->gbm_dev,",
-              indent + "                                                  nzp_gbm_formats[nzp_i], surface_flags)) {",
-              indent + "            surface_fmt = nzp_gbm_formats[nzp_i];",
-              indent + "            SDL_Log(\"NZP: using GBM format 0x%08x\", surface_fmt);",
-              indent + "            break;",
-              indent + "        }",
-              indent + "    }",
-              indent + "    if (surface_fmt == 0) {",
-              indent + "        surface_fmt = GBM_FORMAT_ARGB8888;",
-              indent + "        SDL_LogWarn(SDL_LOG_CATEGORY_VIDEO, \"NZP: no GBM format supported, fallback ARGB8888\");",
-              indent + "    }",
-              indent + "}",
+          helper_lines = [
+              "/* NZP_GBM_FORMAT_AUTODETECT_HELPER */",
+              "static uint32_t",
+              "NZP_ChooseGBMFormat(SDL_VideoData *viddata)",
+              "{",
+              "    const uint32_t surface_flags = GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING;",
+              "    static const uint32_t nzp_gbm_formats[] = {",
+              "        GBM_FORMAT_XRGB8888, GBM_FORMAT_ARGB8888,",
+              "        GBM_FORMAT_RGB565,   GBM_FORMAT_BGR565,",
+              "        GBM_FORMAT_XBGR8888, GBM_FORMAT_ABGR8888,",
+              "        GBM_FORMAT_RGBX8888, GBM_FORMAT_RGBA8888,",
+              "        GBM_FORMAT_BGRX8888, GBM_FORMAT_BGRA8888",
+              "    };",
+              "    int nzp_i;",
+              "    for (nzp_i = 0; nzp_i < (int)(sizeof(nzp_gbm_formats)/sizeof(nzp_gbm_formats[0])); nzp_i++) {",
+              "        if (KMSDRM_gbm_device_is_format_supported(viddata->gbm_dev,",
+              "                                                  nzp_gbm_formats[nzp_i], surface_flags)) {",
+              "            SDL_Log(\"NZP: using GBM format 0x%08x\", nzp_gbm_formats[nzp_i]);",
+              "            return nzp_gbm_formats[nzp_i];",
+              "        }",
+              "    }",
+              "    SDL_LogWarn(SDL_LOG_CATEGORY_VIDEO, \"NZP: no GBM format supported, fallback ARGB8888\");",
+              "    return GBM_FORMAT_ARGB8888;",
+              "}",
+              "",
+              "",
           ]
-          replacement = "\n".join(replacement_lines)
-          text = text[:m.start()] + replacement + text[m.end():]
-          print("OK: GBM format autodetect patched (C90-safe)")
+          helper = "\n".join(helper_lines)
+          text = text[:fm.start()] + helper + text[fm.start():]
+          print("OK: helper NZP_ChooseGBMFormat eingefuegt")
 
-          # Alten Warnblock "Trying anyway" entfernen
+          # 2) surface_fmt-Deklaration durch Funktionsaufruf ersetzen
+          old_decl = "uint32_t surface_fmt = GBM_FORMAT_ARGB8888;"
+          if old_decl not in text:
+              print("ERROR: surface_fmt declaration not found"); sys.exit(1)
+          new_decl = "uint32_t surface_fmt = NZP_ChooseGBMFormat(viddata);"
+          text = text.replace(old_decl, new_decl, 1)
+          print("OK: surface_fmt auf Auto-Detect umgestellt")
+
+          # 3) Alle spaeten Deklarationen (EGLContext, bool result, SDL_DisplayMode etc.)
+          #    nach oben verschieben, damit alle Deklarationen VOR dem ersten Statement stehen.
+          #    Ankerpunkt: direkt nach surface_flags-Deklaration.
+          anchor = "uint32_t surface_flags = GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING;"
+          if anchor not in text:
+              print("ERROR: surface_flags anchor not found"); sys.exit(1)
+
+          moved_decls = []
+
+          # EGLContext egl_context;
+          pat_egl = re.compile(r"\n[ \t]*EGLContext\s+egl_context\s*;[ \t]*\n")
+          m = pat_egl.search(text)
+          if m:
+              moved_decls.append("    EGLContext egl_context;")
+              text = text[:m.start()] + "\n" + text[m.end():]
+              print("OK: EGLContext egl_context verschoben")
+
+          # bool result = false;  (falls noch nicht am Anfang)
+          pat_bool = re.compile(r"\n[ \t]*bool\s+result\s*=\s*false\s*;[ \t]*\n")
+          m = pat_bool.search(text)
+          if m:
+              moved_decls.append("    bool result = false;")
+              text = text[:m.start()] + "\n" + text[m.end():]
+              print("OK: bool result = false verschoben")
+
+          # SDL_DisplayMode mode; / SDL_DisplayMode current_mode; etc. (falls als lokale Deklaration vorhanden)
+          pat_mode = re.compile(r"\n[ \t]*(SDL_DisplayMode\s+\w+)\s*;[ \t]*\n")
+          for mm in pat_mode.finditer(text):
+              decl_text = mm.group(1).strip()
+              if decl_text and not decl_text.startswith("//"):
+                  moved_decls.append("    " + decl_text + ";")
+          # nur entfernen, wenn es mehr als eine gab (um nicht den Funktionsparameter zu treffen)
+          if len(moved_decls) > 2:
+              text = pat_mode.sub("\n", text)
+
+          # Füge die verschobenen Deklarationen direkt nach dem Anchor ein
+          if moved_decls:
+              insertion = "\n".join(moved_decls)
+              text = text.replace(anchor, anchor + "\n" + insertion, 1)
+              print("OK: %d Deklarationen nach oben verschoben" % len(moved_decls))
+
+          # 4) Alten Warnblock "Trying anyway" entfernen
           warn_pattern = re.compile(
               r"[ \t]*if\s*\(!KMSDRM_gbm_device_is_format_supported\s*\([^)]*\)\s*\)\s*\{\s*\n"
               r"[ \t]*SDL_LogWarn\s*\(\s*SDL_LOG_CATEGORY_VIDEO\s*,\s*\n?"
@@ -136,7 +182,7 @@ jobs:
               text = new_text
               print("OK: removed old 'Trying anyway' warning")
 
-          # KMSDRM_CreateWindow: echten Fehler loggen
+          # 5) KMSDRM_CreateWindow: echten Fehler loggen
           caller_pattern = re.compile(
               r"if\s*\(\s*!KMSDRM_CreateSurfaces\s*\(\s*_this\s*,\s*window\s*\)\s*\)\s*\{\s*\n"
               r"([ \t]*)return\s+SDL_SetError\s*\(\s*\"Can't window GBM/EGL surfaces on window creation\.\"\s*\)\s*;\s*\n"
@@ -154,10 +200,17 @@ jobs:
               print("OK: KMSDRM_CreateWindow logs real error")
 
           path.write_text(text)
-          print("=== Verify patched source ===")
-          for line in text.splitlines():
-              if "NZP_GBM_FORMAT_AUTODETECT" in line or "NZP: KMSDRM_CreateSurfaces failed" in line:
-                  print("   ", line.strip())
+          print("=== Verify: erste 25 Zeilen von KMSDRM_CreateSurfaces ===")
+          # Finde KMSDRM_CreateSurfaces und gib die ersten Zeilen aus
+          m = re.search(
+              r"bool\s*\n?KMSDRM_CreateSurfaces\s*\([^)]*\)\s*\{([\s\S]{0,1500})",
+              text,
+          )
+          if m:
+              body = m.group(1)
+              # nur die ersten 25 Zeilen
+              for i, line in enumerate(body.splitlines()[:25]):
+                  print("   ", line)
           PYEOF
 
           cat > "$RUNNER_TEMP/nzp-build/patch_sdl_misc.py" << 'PYEOF'
@@ -228,8 +281,8 @@ jobs:
           echo "=== SDL misc patches ==="
           python3 /tmp/patch_sdl_misc.py .
 
-          echo "=== Verify patched source ==="
-          grep -n "NZP_GBM_FORMAT_AUTODETECT\|NZP: KMSDRM_CreateSurfaces failed" src/video/kmsdrm/SDL_kmsdrmvideo.c | head -5 || true
+          echo "=== Verify patched source (grep) ==="
+          grep -n "NZP_ChooseGBMFormat\|NZP: KMSDRM_CreateSurfaces failed" src/video/kmsdrm/SDL_kmsdrmvideo.c | head -8 || true
 
           CFLAGS="-fPIC -Wno-declaration-after-statement" \
           LDFLAGS="-L/usr/lib/aarch64-linux-gnu" \
