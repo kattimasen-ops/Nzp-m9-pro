@@ -73,87 +73,181 @@ jobs:
               print("eglrendererinfo already defined")
           PYEOF
 
-          cat > "$RUNNER_TEMP/nzp-build/patch_sdl_mali.py" << 'PYEOF'
+          # ============================================================
+          # KERNPATCH: KMSDRM_CreateSurfaces versucht ALLE GBM-Formate
+          # (offizieller SDL-Fix von Ryan C. Gordon, Sep 2026)
+          # ============================================================
+          cat > "$RUNNER_TEMP/nzp-build/patch_kmsdrm_create_surfaces.py" << 'PYEOF'
           import sys, pathlib, re
 
-          base = pathlib.Path(sys.argv[1])
+          path = pathlib.Path(sys.argv[1] + "/src/video/kmsdrm/SDL_kmsdrmvideo.c")
+          text = path.read_text()
 
-          # ---------- Patch 1: GBM-Format für Mali (ARGB8888 → XRGB8888) ----------
-          f_vid = base / "src/video/kmsdrm/SDL_kmsdrmvideo.c"
-          if f_vid.exists():
-              t = f_vid.read_text()
-              if "GBM_FORMAT_ARGB8888" in t:
-                  t = t.replace("GBM_FORMAT_ARGB8888", "GBM_FORMAT_XRGB8888")
-                  f_vid.write_text(t)
-                  print("OK: GBM_FORMAT_ARGB8888 -> GBM_FORMAT_XRGB8888 (Mali-Fix)")
-              else:
-                  print("GBM_FORMAT_ARGB8888 nicht gefunden – prüfe SDL-Version")
+          if "NZP_KMSDRM_FORMAT_AUTODETECT" in text:
+              print("KMSDRM format-autodetect already patched"); sys.exit(0)
 
-              # ---------- Patch 2: gbm_device_get_fd Workaround ----------
-              t = f_vid.read_text()
-              if "NZP_GBM_DEVICE_FD_WORKAROUND" not in t:
-                  pat = re.compile(r"(dispdata->gbm\s*=\s*KMSDRM_gbm_create_device\s*\([^;]+\);)")
-                  m = pat.search(t)
-                  if m:
-                      repl = (
-                          m.group(1) + "\n"
-                          "    /* NZP_GBM_DEVICE_FD_WORKAROUND */\n"
-                          "    if (dispdata->gbm) {\n"
-                          "        dispdata->drm_fd = KMSDRM_gbm_device_get_fd(dispdata->gbm);\n"
-                          "    }"
-                      )
-                      t = t[:m.start()] + repl + t[m.end():]
-                      f_vid.write_text(t)
-                      print("OK: gbm_device_get_fd Workaround eingefügt")
-                  else:
-                      print("WARNUNG: gbm_create_device-Muster nicht gefunden")
+          # Funktionskopf finden
+          pat = re.compile(
+              r"bool\s+KMSDRM_CreateSurfaces\s*\(\s*SDL_VideoDevice\s*\*\s*_this\s*,\s*SDL_Window\s*\*\s*window\s*\)\s*\{",
+              re.DOTALL,
+          )
+          m = pat.search(text)
+          if not m:
+              print("ERROR: KMSDRM_CreateSurfaces not found"); sys.exit(1)
 
-              # ---------- Patch 3: KMSDRM_CreateWindow Prüfung ----------
-              t = f_vid.read_text()
-              if "NZP_KMSDRM_CREATEWINDOW_FIX" not in t:
-                  pat = re.compile(
-                      r"(ret\s*=\s*KMSDRM_CreateSurfaces\s*\(\s*_this\s*,\s*window\s*\)\s*;\s*\n)"
-                      r"(\s*)if\s*\(\s*!\s*ret\s*\)",
-                      re.DOTALL,
-                  )
-                  m = pat.search(t)
-                  if m:
-                      t = t[:m.start()] + (
-                          "ret = KMSDRM_CreateSurfaces(_this, window);\n"
-                          "    /* NZP_KMSDRM_CREATEWINDOW_FIX */\n"
-                          "    if (ret != 0) {"
-                      ) + t[m.end():]
-                      f_vid.write_text(t)
-                      print("OK: KMSDRM_CreateWindow Prüfung korrigiert (falls nötig)")
-                  else:
-                      print("KMSDRM_CreateWindow: keine invertierte Prüfung gefunden (bereits korrekt)")
+          # Klammerzählung: passende schließende } finden
+          brace_start = m.end() - 1  # position of '{'
+          depth = 0
+          i = brace_start
+          while i < len(text):
+              c = text[i]
+              if c == '{':
+                  depth += 1
+              elif c == '}':
+                  depth -= 1
+                  if depth == 0:
+                      break
+              i += 1
+          if depth != 0:
+              print("ERROR: unmatched braces"); sys.exit(1)
 
-          # ---------- Patch 4: eglGetPlatformDisplayEXT (Mali) ----------
-          f_egl = base / "src/video/kmsdrm/SDL_kmsdrmopengles.c"
-          if f_egl.exists():
-              t = f_egl.read_text()
-              if "NZP_MALI_EGL_PLATFORM" not in t:
-                  pat = re.compile(r"(eglGetDisplay\s*\([^)]*\))")
-                  m = pat.search(t)
-                  if m:
-                      repl = (
-                          "/* NZP_MALI_EGL_PLATFORM: Mali braucht eglGetPlatformDisplayEXT */\n"
-                          "    {\n"
-                          "        PFNEGLGETPLATFORMDISPLAYEXTPROC getPlatformDisplay =\n"
-                          "            (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress(\"eglGetPlatformDisplayEXT\");\n"
-                          "        if (getPlatformDisplay) {\n"
-                          "            display = getPlatformDisplay(EGL_PLATFORM_GBM_KHR, gbm_dev, NULL);\n"
-                          "        }\n"
-                          "    }\n"
-                          "    if (display == EGL_NO_DISPLAY) {\n"
-                          "        display = " + m.group(1).strip() + ";\n"
-                          "    }"
-                      )
-                      t = t[:m.start()] + repl + t[m.end():]
-                      f_egl.write_text(t)
-                      print("OK: eglGetPlatformDisplayEXT-Fallback")
-                  else:
-                      print("WARNUNG: eglGetDisplay nicht gefunden")
+          brace_end = i  # position of final '}'
+
+          new_func = r'''
+          /* NZP_KMSDRM_FORMAT_AUTODETECT: statt ARGB8888 zu erzwingen, alle
+           * GBM-Formate durchprobieren (offizieller SDL-Fix fuer Mali/RK3326). */
+          bool
+          KMSDRM_CreateSurfaces(SDL_VideoDevice *_this, SDL_Window *window)
+          {
+              static const struct {
+                  uint32_t fmt;
+                  const char *name;
+                  int r;
+                  int g;
+                  int b;
+                  int a;
+              } gbm_formats[] = {
+                  #define FMT(name, r, g, b, a) { GBM_FORMAT_##name, #name, r, g, b, a }
+                  FMT(ARGB8888, 8, 8, 8, 8),
+                  FMT(ABGR8888, 8, 8, 8, 8),
+                  FMT(BGRA8888, 8, 8, 8, 8),
+                  FMT(RGBA8888, 8, 8, 8, 8),
+                  FMT(BGRX8888, 8, 8, 8, 0),
+                  FMT(RGBX8888, 8, 8, 8, 0),
+                  FMT(XRGB8888, 8, 8, 8, 0),
+                  FMT(XBGR8888, 8, 8, 8, 0),
+                  FMT(RGBA1010102, 10, 10, 10, 2),
+                  FMT(BGRA1010102, 10, 10, 10, 2),
+                  FMT(ARGB2101010, 10, 10, 10, 2),
+                  FMT(ABGR2101010, 10, 10, 10, 2),
+                  FMT(XRGB2101010, 10, 10, 10, 0),
+                  FMT(XBGR2101010, 10, 10, 10, 0),
+                  FMT(RGBX1010102, 10, 10, 10, 0),
+                  FMT(BGRX1010102, 10, 10, 10, 0),
+                  FMT(ARGB1555, 5, 5, 5, 1),
+                  FMT(ABGR1555, 5, 5, 5, 1),
+                  FMT(RGBA5551, 5, 5, 5, 1),
+                  FMT(BGRA5551, 5, 5, 5, 1),
+                  FMT(XRGB1555, 5, 5, 5, 0),
+                  FMT(XBGR1555, 5, 5, 5, 0),
+                  FMT(RGBX5551, 5, 5, 5, 0),
+                  FMT(BGRX5551, 5, 5, 5, 0),
+                  FMT(RGB565, 5, 6, 5, 0),
+                  FMT(BGR565, 5, 6, 5, 0)
+                  #undef FMT
+              };
+              SDL_VideoData *viddata = _this->internal;
+              SDL_WindowData *windata = window->internal;
+              SDL_VideoDisplay *display = SDL_GetVideoDisplayForWindow(window);
+              SDL_DisplayData *dispdata = display->internal;
+              bool result = false;
+              EGLContext egl_context;
+              bool tried_setting_format = false;
+              const uint32_t surface_flags = GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING;
+
+              /* If the current window already has surfaces, destroy them before creating other. */
+              if (windata->gs) {
+                  KMSDRM_DestroySurfaces(_this, window);
+              }
+
+              for (int i = 0; i < SDL_arraysize(gbm_formats); i++) {
+                  const uint32_t surface_fmt = gbm_formats[i].fmt;
+
+                  SDL_Log("KMSDRM: Trying format GBM_FORMAT_%s", gbm_formats[i].name);
+
+                  if (!KMSDRM_gbm_device_is_format_supported(viddata->gbm_dev, surface_fmt, surface_flags)) {
+                      SDL_LogWarn(SDL_LOG_CATEGORY_VIDEO, "KMSDRM: GBM_FORMAT_%s is not supported.", gbm_formats[i].name);
+                      continue; /* try the next one. */
+                  }
+
+                  tried_setting_format = true;
+
+                  KMSDRM_GetModeToSet(window, &dispdata->mode);
+
+                  windata->gs = KMSDRM_gbm_surface_create(viddata->gbm_dev,
+                                                         dispdata->mode.hdisplay, dispdata->mode.vdisplay,
+                                                         surface_fmt, surface_flags);
+                  if (!windata->gs && errno == ENOSYS) {
+                      /* Try again without the scanout flags, needed on NVIDIA drivers */
+                      windata->gs = KMSDRM_gbm_surface_create(viddata->gbm_dev,
+                                                             dispdata->mode.hdisplay, dispdata->mode.vdisplay,
+                                                             surface_fmt, 0);
+                  }
+                  if (!windata->gs) {
+                      SDL_LogWarn(SDL_LOG_CATEGORY_VIDEO, "KMSDRM: gbm_surface_create(GBM_FORMAT_%s) failed.", gbm_formats[i].name);
+                      SDL_SetError("Could not create %s GBM surface: %s", gbm_formats[i].name, strerror(errno));
+                      continue; /* try the next one. */
+                  }
+
+                  SDL_EGL_SetRequiredVisualId(_this, surface_fmt);
+                  windata->egl_surface = SDL_EGL_CreateSurface(_this, window, (NativeWindowType)windata->gs);
+
+                  if (windata->egl_surface == EGL_NO_SURFACE) {
+                      SDL_LogWarn(SDL_LOG_CATEGORY_VIDEO, "KMSDRM: SDL_EGL_CreateSurface(GBM_FORMAT_%s) failed: %s", gbm_formats[i].name, SDL_GetError());
+                      KMSDRM_gbm_surface_destroy(windata->gs);
+                      windata->gs = NULL;
+                      continue; /* try the next one. */
+                  }
+
+                  egl_context = (EGLContext)SDL_GL_GetCurrentContext();
+                  result = SDL_EGL_MakeCurrent(_this, windata->egl_surface, egl_context);
+
+                  if (!result) {
+                      SDL_LogWarn(SDL_LOG_CATEGORY_VIDEO, "KMSDRM: SDL_EGL_MakeCurrent with GBM_FORMAT_%s failed: %s", gbm_formats[i].name, SDL_GetError());
+                      continue;
+                  }
+
+                  _this->gl_config.red_size = gbm_formats[i].r;
+                  _this->gl_config.green_size = gbm_formats[i].g;
+                  _this->gl_config.blue_size = gbm_formats[i].b;
+                  _this->gl_config.alpha_size = gbm_formats[i].a;
+
+                  windata->egl_surface_dirty = false;
+
+                  result = true;
+
+                  SDL_SendWindowEvent(window, SDL_EVENT_WINDOW_RESIZED,
+                                     dispdata->mode.hdisplay, dispdata->mode.vdisplay);
+
+                  break;
+              }
+
+              SDL_assert(result || (windata->gs == NULL));
+
+              if (!result) {
+                  SDL_LogError(SDL_LOG_CATEGORY_VIDEO, "KMSDRM: Failed to create surfaces in _any_ format!");
+                  if (!tried_setting_format) { /* make sure there's an error string set. */
+                      SDL_SetError("Could not find any supported GBM surface format.");
+                  }
+              }
+
+              return result;
+          }
+          '''
+
+          text = text[:m.start()] + new_func + text[brace_end+1:]
+          path.write_text(text)
+          print("OK: KMSDRM_CreateSurfaces auf Format-Autodetect umgestellt")
           PYEOF
 
           cat > "$RUNNER_TEMP/nzp-build/patch_kmsdrm_orig.py" << 'PYEOF'
@@ -166,8 +260,7 @@ jobs:
                   ins = ("    /* NZP-M9-KMSDRM-WINDOW-FLAG */\n"
                          "    if (!(window->flags & SDL_WINDOW_VULKAN)) {\n"
                          "        window->flags |= SDL_WINDOW_OPENGL;\n"
-                         "    }\n"
-                         "    SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO, \"NZP-M9-WINDOW-FLAG-ACTIVE\");\n\n")
+                         "    }\n\n")
                   t = t[:m.start()] + ins + t[m.start():]
                   path.write_text(t); print("OK: Window-Flag Patch")
           t = path.read_text()
@@ -176,7 +269,6 @@ jobs:
               if m:
                   fb = ("\n    /* NZP-M9-PAGEFLIP-FALLBACK */\n"
                         "    if (ret != 0 && (flip_flags & DRM_MODE_PAGE_FLIP_ASYNC)) {\n"
-                        "        SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO, \"NZP-M9-PAGEFLIP-SYNC-FALLBACK\");\n"
                         "        viddata->async_pageflip_support = SDL_FALSE;\n"
                         "        flip_flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;\n"
                         "        ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id, fb_info->fb_id, flip_flags, &windata->waiting_for_flip);\n"
@@ -220,8 +312,10 @@ jobs:
           tar xf "SDL2-${SDL2_VER}.tar.gz"
           cd "SDL2-${SDL2_VER}"
 
-          echo "=== Mali-SDL-Patches anwenden ==="
-          python3 /tmp/patch_sdl_mali.py .
+          echo "=== KMSDRM Format-Autodetect-Patch ==="
+          python3 /tmp/patch_kmsdrm_create_surfaces.py .
+
+          echo "=== Weitere Mali-Patches ==="
           python3 /tmp/patch_kmsdrm_orig.py .
 
           CFLAGS="-fPIC -Wno-declaration-after-statement" \
@@ -304,7 +398,7 @@ jobs:
           ln -sf libSDL2-2.0.so.0 libSDL2-2.0.so || true
 
           echo "=== Patch-Marker in libSDL2-2.0.so.0 ==="
-          strings libSDL2-2.0.so.0 | grep -E "NZP-M9|NZP_MALI|NZP_KMSDRM|NZP_GBM" || echo "WARNUNG: Patch-Marker nicht gefunden!"
+          strings libSDL2-2.0.so.0 | grep -E "NZP_KMSDRM_FORMAT_AUTODETECT|Trying format GBM_FORMAT" || echo "WARNUNG: Format-Autodetect-Marker nicht gefunden!"
           echo "=== Fertig ==="
           ls -la nzportablearm64* libSDL2-2.0.so* 2>/dev/null || true
           BUILDEOF
@@ -316,7 +410,7 @@ jobs:
             -v "$RUNNER_TEMP/nzp-build/patch_prcmds.py:/tmp/patch_prcmds.py:ro" \
             -v "$RUNNER_TEMP/nzp-build/patch_makefile.py:/tmp/patch_makefile.py:ro" \
             -v "$RUNNER_TEMP/nzp-build/patch_glvidegl.py:/tmp/patch_glvidegl.py:ro" \
-            -v "$RUNNER_TEMP/nzp-build/patch_sdl_mali.py:/tmp/patch_sdl_mali.py:ro" \
+            -v "$RUNNER_TEMP/nzp-build/patch_kmsdrm_create_surfaces.py:/tmp/patch_kmsdrm_create_surfaces.py:ro" \
             -v "$RUNNER_TEMP/nzp-build/patch_kmsdrm_orig.py:/tmp/patch_kmsdrm_orig.py:ro" \
             -v "$RUNNER_TEMP/nzp-build/build.sh:/tmp/build.sh:ro" \
             -w /workspace \
