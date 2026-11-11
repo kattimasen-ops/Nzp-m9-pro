@@ -1,0 +1,184 @@
+name: Build TX3 Fix & Updated Launcher
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install ARM 32-bit Cross Compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-arm-linux-gnueabihf zip
+
+      - name: Create Shim C Source
+        run: |
+          cat << 'EOF' > shim.c
+          #define _GNU_SOURCE
+          #include <stddef.h>
+          #include <string.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+
+          // 1. strlcpy - Sicheres Kopieren von Strings (Android Bionic -> Glibc Fallback)
+          size_t strlcpy(char *dst, const char *src, size_t size) {
+              size_t srclen = strlen(src);
+              if (size > 0) {
+                  size_t copylen = (srclen >= size) ? size - 1 : srclen;
+                  memcpy(dst, src, copylen);
+                  dst[copylen] = '\0';
+              }
+              return srclen;
+          }
+
+          // 2. strlcat - Sicheres Anfügen von Strings
+          size_t strlcat(char *dst, const char *src, size_t size) {
+              size_t dstlen = strlen(dst);
+              size_t srclen = strlen(src);
+              if (dstlen >= size) {
+                  return size + srclen;
+              }
+              size_t copylen = size - dstlen - 1;
+              if (srclen < copylen) {
+                  copylen = srclen;
+              }
+              memcpy(dst + dstlen, src, copylen);
+              dst[dstlen + copylen] = '\0';
+              return dstlen + srclen;
+          }
+
+          // 3. __system_property_get - Fake Android Property Lookup (verhindert Unity-Crashs bei Android-Abfragen)
+          int __system_property_get(const char *name, char *value) {
+              if (!name || !value) return 0;
+              if (strcmp(name, "ro.build.version.sdk") == 0) {
+                  strcpy(value, "19"); // Android KitKat (API 19 aus deinen Logs)
+                  return 2;
+              }
+              if (strcmp(name, "ro.product.model") == 0) {
+                  strcpy(value, "M9 Pro");
+                  return 6;
+              }
+              value[0] = '\0';
+              return 0;
+          }
+          EOF
+
+      - name: Compile 32-bit Shared Library
+        run: |
+          arm-linux-gnueabihf-gcc -shared -fPIC -O3 -Wall -Wextra shim.c -o libstrlcpy_shim.so
+          file libstrlcpy_shim.so
+
+      - name: Generate Patched Trial Xtreme 3.sh
+        run: |
+          cat << 'EOF' > "Trial Xtreme 3.sh"
+          #!/bin/bash
+          # Port made by Mega & Auto-Patched with Shim Fix
+          export PORT_32BIT=Y
+          capture_arm(){
+           [ -z "${LD_LIBRARY_PATH:-}" ] || export TX3_ARM_LIBPATH="${TX3_ARM_LIBPATH:+$TX3_ARM_LIBPATH:}$LD_LIBRARY_PATH"
+           [ -z "${ALSA_PLUGIN_DIR:-}" ] || export TX3_ARM_ALSA="$ALSA_PLUGIN_DIR"
+           [ -z "${PIPEWIRE_MODULE_DIR:-}" ] || export TX3_ARM_PIPEWIRE="$PIPEWIRE_MODULE_DIR"
+           [ -z "${SPA_PLUGIN_DIR:-}" ] || export TX3_ARM_SPA="$SPA_PLUGIN_DIR"
+           unset LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT SDL_VIDEO_EGL_DRIVER SDL_VIDEO_GL_DRIVER
+           unset ALSA_PLUGIN_DIR ALSA_CONFIG_PATH PIPEWIRE_MODULE_DIR SPA_PLUGIN_DIR
+          }
+          capture_arm
+          script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)" || exit 1
+
+          valid_port(){ [ -f "$1/tools/run.py" ] && [ -f "$1/tools/install.py" ] && [ -f "$1/bin/ua_host" ]; }
+          port=""
+          for candidate in "$script_dir/trialxtreme3" "${TX3_PORT_DIR:-}" "${GAMEDIR:-}" /mnt/mmc/ports/trialxtreme3 /mnt/mmc/ROMS/Ports/trialxtreme3 /mnt/mmc/roms/ports/trialxtreme3 /mnt/sdcard/ports/trialxtreme3 /mnt/sdcard/ROMS/Ports/trialxtreme3 /mnt/sdcard/roms/ports/trialxtreme3 /mnt/SDCARD/Ports/trialxtreme3 /roms/ports/trialxtreme3 /roms2/ports/trialxtreme3 /userdata/roms/ports/trialxtreme3; do
+           if [ -n "$candidate" ] && valid_port "$candidate"; then port="$candidate"; break; fi
+          done
+          if [ -z "$port" ]; then
+           mkdir -p "$script_dir/trialxtreme3/logs" || exit 1
+           printf 'Trial Xtreme 3 test10: pasta completa do port nao encontrada.\nLauncher: %s\nInstale a pasta trialxtreme3 do ZIP junto ao launcher ou em ports do SD1/SD2. Preservar payload e saves.\n' "$script_dir" >> "$script_dir/trialxtreme3/logs/bootstrap.log"
+           exit 1
+          fi
+          mkdir -p "$port/logs" || exit 1
+          exec >>"$port/logs/bootstrap.log" 2>&1
+          printf '\nTrial Xtreme 3 test10 startup\n'
+          printf '[launcher] script=%s; port=%s\n' "$script_dir" "$port"
+          if [ "$(wc -c < "$port/logs/bootstrap.log")" -gt 65536 ]; then
+           tail -c 32768 "$port/logs/bootstrap.log" > "$port/logs/.bootstrap-tail"
+           cat "$port/logs/.bootstrap-tail" > "$port/logs/bootstrap.log"
+           python3 -c 'import os,sys;os.unlink(sys.argv[1])' "$port/logs/.bootstrap-tail"
+          fi
+          trialxtreme3_port_saved="$port"
+          controlfolder=""
+          for candidate in "${TX3_PM_DIR:-}" /opt/system/Tools/PortMaster /opt/tools/PortMaster /roms/ports/PortMaster /roms2/ports/PortMaster /mnt/mmc/ports/PortMaster /mnt/sdcard/ports/PortMaster /mnt/sdcard/ROMS/Ports/PortMaster /mnt/SDCARD/Ports/PortMaster /userdata/roms/ports/PortMaster /storage/.config/PortMaster /var/data/PortMaster /PortMaster /roms/tools/PortMaster /roms2/tools/PortMaster /userdata/system/.local/share/PortMaster /mnt/mmc/MUOS/PortMaster "${XDG_DATA_HOME:-$HOME/.local/share}/PortMaster"; do
+           if [ -f "$candidate/control.txt" ]; then controlfolder="$candidate"; break; fi
+          done
+          if [ -n "$controlfolder" ]; then
+           source "$controlfolder/control.txt";capture_arm
+           case "${CFW_NAME:-}" in ''|*[!A-Za-z0-9._-]*) ;; *) [ ! -r "$controlfolder/mod_${CFW_NAME}.txt" ] || source "$controlfolder/mod_${CFW_NAME}.txt" ;; esac
+           capture_arm
+           if declare -F get_controls >/dev/null; then get_controls; fi
+           capture_arm
+           if declare -F pm_platform_helper >/dev/null; then pm_platform_helper "$port/bin/ua_host"; fi
+           capture_arm
+          fi
+          port="$trialxtreme3_port_saved"
+          [ -z "${sdl_controllerconfig:-}" ] || export SDL_GAMECONTROLLERCONFIG="$sdl_controllerconfig"
+          export SDL_GAMECONTROLLER_USE_BUTTON_LABELS=0
+          export CFW_NAME="${CFW_NAME:-}" GAMEDIR="$port"
+
+          # SHIM FIX FOR M9 PRO / GLIBC ARMHF:
+          if [ -f "$port/bin/libstrlcpy_shim.so" ]; then
+              export LD_PRELOAD="$port/bin/libstrlcpy_shim.so${LD_PRELOAD:+:$LD_PRELOAD}"
+              printf '[shim] LD_PRELOAD=%s\n' "$LD_PRELOAD"
+          elif [ -f "$script_dir/libstrlcpy_shim.so" ]; then
+              export LD_PRELOAD="$script_dir/libstrlcpy_shim.so${LD_PRELOAD:+:$LD_PRELOAD}"
+              printf '[shim] LD_PRELOAD=%s\n' "$LD_PRELOAD"
+          fi
+
+          python_bin="$(command -v python3)"
+          if [ -z "$python_bin" ]; then printf 'Python 3 nativo ausente.\n'; exit 1; fi
+          supervisor_pid="";finished=0
+          cleanup(){
+           [ "$finished" = 0 ] || return
+           finished=1;capture_arm
+           if [ -n "$supervisor_pid" ] && kill -0 "$supervisor_pid" 2>/dev/null; then
+            kill -TERM "$supervisor_pid" 2>/dev/null || true
+            for ((i=0;i<40;i++)); do kill -0 "$supervisor_pid" 2>/dev/null || break; sleep 0.1; done
+            kill -KILL "$supervisor_pid" 2>/dev/null || true
+            wait "$supervisor_pid" 2>/dev/null || true
+           fi
+           declare -F restore_muos_audio >/dev/null && restore_muos_audio
+           capture_arm
+           declare -F pm_finish >/dev/null && pm_finish
+           return 0
+          }
+          trap cleanup EXIT
+          trap 'exit 143' TERM
+          trap 'exit 130' INT
+          trap 'exit 129' HUP
+          export TX3_MUOS=0
+          case "${CFW_NAME,,}" in muos*) TX3_MUOS=1 ;; esac
+          [ ! -d /opt/muos ] || TX3_MUOS=1
+          if [ "$TX3_MUOS" = 1 ]; then
+           source "$port/tools/muos-audio.sh"
+           start_muos_audio
+          fi
+          "$python_bin" "$port/tools/run.py" "$port" & supervisor_pid=$!
+          wait "$supervisor_pid";status=$?;supervisor_pid=""
+          exit "$status"
+          EOF
+          chmod +x "Trial Xtreme 3.sh"
+
+      - name: Create Output Package
+        run: |
+          mkdir -p output/bin
+          cp libstrlcpy_shim.so output/bin/
+          cp libstrlcpy_shim.so output/
+          cp "Trial Xtreme 3.sh" output/
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: TX3-M9Pro-Fix
+          path: output/
