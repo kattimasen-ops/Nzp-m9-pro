@@ -73,19 +73,132 @@ jobs:
               print("eglrendererinfo already defined")
           PYEOF
 
-          # NEU: Mali-spezifische SDL-Patches
+          # --- ROBUSTER KMSDRM-Patch (CreateWindow-Fix + Mali-EGL + GBM-Format) ---
           cat > "$RUNNER_TEMP/nzp-build/patch_sdl_mali.py" << 'PYEOF'
           import sys, pathlib, re
 
           base = pathlib.Path(sys.argv[1])
 
-          # --- Patch 1: eglGetPlatformDisplayEXT (Mali-Kompatibilitaet) ---
+          # ---------- Patch 1: KMSDRM_CreateWindow invertierte Prüfung ----------
+          f_vid = base / "src/video/kmsdrm/SDL_kmsdrmvideo.c"
+          if f_vid.exists():
+              t = f_vid.read_text()
+              if "NZP_KMSDRM_CREATEWINDOW_FIX" not in t:
+                  # Sucht den fehlerhaften Block in allen Formatierungsvarianten:
+                  #   ret = KMSDRM_CreateSurfaces(_this, window);
+                  #   if (ret == 0) {
+                  #       if (ret != 0) {
+                  #           return SDL_SetError("Can't window GBM/EGL surfaces...");
+                  #       }
+                  #   }
+                  patterns = [
+                      # Variante A: exakt der bekannte Bug
+                      r"ret\s*=\s*KMSDRM_CreateSurfaces\s*\(\s*_this\s*,\s*window\s*\)\s*;\s*\n"
+                      r"(\s*)if\s*\(\s*ret\s*==\s*0\s*\)\s*\{\s*\n"
+                      r"\s*if\s*\(\s*ret\s*!=\s*0\s*\)\s*\{\s*\n"
+                      r"\s*return\s+SDL_SetError\s*\(\s*\"Can't window GBM/EGL surfaces on window creation\.\"\s*\)\s*;\s*\n"
+                      r"\s*\}\s*\n"
+                      r"\s*\}",
+                      # Variante B: gleicher Bug, aber andere Einrückung/Whitespace
+                      r"ret\s*=\s*KMSDRM_CreateSurfaces\s*\(\s*_this\s*,\s*window\s*\)\s*;"
+                      r".*?if\s*\(\s*ret\s*==\s*0\s*\)\s*\{"
+                      r".*?if\s*\(\s*ret\s*!=\s*0\s*\)\s*\{"
+                      r".*?SDL_SetError\s*\(\s*\"Can't window GBM/EGL surfaces on window creation\.\"\s*\)\s*;"
+                      r".*?\}",
+                  ]
+                  fixed = False
+                  for pat in patterns:
+                      m = re.search(pat, t, re.DOTALL)
+                      if m:
+                          # Ersetzt den gesamten Block durch den korrekten Code
+                          replacement = (
+                              "ret = KMSDRM_CreateSurfaces(_this, window);\n"
+                              "    /* NZP_KMSDRM_CREATEWINDOW_FIX: invertierte Prüfung korrigiert */\n"
+                              "    if (ret != 0) {\n"
+                              "        return SDL_SetError(\"Can't window GBM/EGL surfaces on window creation.\");\n"
+                              "    }"
+                          )
+                          t = t[:m.start()] + replacement + t[m.end():]
+                          fixed = True
+                          break
+                  if fixed:
+                      f_vid.write_text(t)
+                      print("OK: KMSDRM_CreateWindow invertierte Prüfung korrigiert")
+                  else:
+                      # Fallback: nur die Zeile "if (ret == 0)" im Kontext ersetzen
+                      # Suche die Zeile im Umfeld von KMSDRM_CreateSurfaces
+                      m = re.search(
+                          r"(ret\s*=\s*KMSDRM_CreateSurfaces\s*\(\s*_this\s*,\s*window\s*\)\s*;\s*\n)"
+                          r"(\s*)if\s*\(\s*ret\s*==\s*0\s*\)",
+                          t,
+                      )
+                      if m:
+                          # Ersetze "if (ret == 0)" durch "if (ret != 0)" und entferne den inneren Block
+                          after = t[m.end():]
+                          # Entferne den inneren "if (ret != 0) { ... }"-Block, falls vorhanden
+                          inner = re.search(
+                              r"^\s*\{\s*\n"
+                              r"\s*if\s*\(\s*ret\s*!=\s*0\s*\)\s*\{\s*\n"
+                              r".*?SDL_SetError\s*\(\s*\"Can't window GBM/EGL surfaces on window creation\.\"\s*\)\s*;\s*\n"
+                              r"\s*\}\s*\n"
+                              r"\s*\}",
+                              after,
+                              re.DOTALL,
+                          )
+                          if inner:
+                              t = t[:m.start()] + m.group(1) + m.group(2) + "if (ret != 0) {" + after[inner.end():]
+                              # Jetzt fehlt noch der SDL_SetError-Aufruf
+                              t = t.replace(
+                                  "if (ret != 0) {",
+                                  "if (ret != 0) {\n        return SDL_SetError(\"Can't window GBM/EGL surfaces on window creation.\");",
+                                  1,
+                              )
+                              f_vid.write_text(t)
+                              print("OK: KMSDRM_CreateWindow Fallback-Patch (Zeile) angewendet")
+                          else:
+                              print("WARNUNG: KMSDRM_CreateWindow-Muster nicht gefunden – manueller Eingriff nötig")
+                      else:
+                          print("WARNUNG: KMSDRM_CreateSurfaces-Aufruf nicht gefunden")
+              else:
+                  print("KMSDRM_CreateWindow bereits gepatcht")
+
+              # ---------- Patch 2: GBM-Format (Mali erwartet GBM_FORMAT_XRGB8888) ----------
+              t = f_vid.read_text()
+              if "GBM_BO_FORMAT_XRGB8888" in t:
+                  t = t.replace("GBM_BO_FORMAT_XRGB8888", "GBM_FORMAT_XRGB8888")
+                  f_vid.write_text(t)
+                  print("OK: GBM_BO_FORMAT_XRGB8888 -> GBM_FORMAT_XRGB8888")
+              else:
+                  print("GBM_BO_FORMAT_XRGB8888 nicht gefunden (bereits korrekt)")
+
+              # ---------- Patch 3: gbm_device_get_fd Workaround ----------
+              t = f_vid.read_text()
+              if "NZP_GBM_DEVICE_FD_WORKAROUND" not in t:
+                  pat = re.compile(r"(dispdata->gbm\s*=\s*KMSDRM_gbm_create_device\s*\([^;]+\);)")
+                  m = pat.search(t)
+                  if m:
+                      repl = (
+                          m.group(1) + "\n"
+                          "    /* NZP_GBM_DEVICE_FD_WORKAROUND: libmali dupliziert den fd */\n"
+                          "    if (dispdata->gbm) {\n"
+                          "        dispdata->drm_fd = KMSDRM_gbm_device_get_fd(dispdata->gbm);\n"
+                          "    }"
+                      )
+                      t = t[:m.start()] + repl + t[m.end():]
+                      f_vid.write_text(t)
+                      print("OK: gbm_device_get_fd Workaround eingefügt")
+                  else:
+                      print("WARNUNG: gbm_create_device-Muster nicht gefunden")
+              else:
+                  print("gbm_device_get_fd Workaround bereits vorhanden")
+
+          # ---------- Patch 4: eglGetPlatformDisplayEXT (Mali braucht EGL_PLATFORM_GBM_KHR) ----------
           f_egl = base / "src/video/kmsdrm/SDL_kmsdrmopengles.c"
           if f_egl.exists():
               t = f_egl.read_text()
               if "NZP_MALI_EGL_PLATFORM" not in t:
-                  # Suche den eglGetDisplay-Aufruf und fuege Platform-Display davor ein
-                  pat = re.compile(r"(eglGetDisplay\s*\([^)]*\))", re.DOTALL)
+                  # Robuster: Suche eglGetDisplay-Aufruf und füge Platform-Display davor ein
+                  pat = re.compile(r"(eglGetDisplay\s*\([^)]*\))")
                   m = pat.search(t)
                   if m:
                       repl = (
@@ -105,72 +218,13 @@ jobs:
                       f_egl.write_text(t)
                       print("OK: eglGetPlatformDisplayEXT-Fallback in SDL_kmsdrmopengles.c")
                   else:
-                      print("WARNUNG: eglGetDisplay nicht gefunden")
+                      print("WARNUNG: eglGetDisplay nicht gefunden – manueller Eingriff nötig")
               else:
                   print("eglGetPlatformDisplayEXT bereits gepatcht")
-
-          # --- Patch 2: GBM-Format (Mali erwartet GBM_FORMAT_XRGB8888) ---
-          f_vid = base / "src/video/kmsdrm/SDL_kmsdrmvideo.c"
-          if f_vid.exists():
-              t = f_vid.read_text()
-              if "GBM_BO_FORMAT_XRGB8888" in t:
-                  t = t.replace("GBM_BO_FORMAT_XRGB8888", "GBM_FORMAT_XRGB8888")
-                  f_vid.write_text(t)
-                  print("OK: GBM_BO_FORMAT_XRGB8888 -> GBM_FORMAT_XRGB8888")
-              else:
-                  print("GBM_BO_FORMAT_XRGB8888 nicht gefunden (bereits korrekt)")
-
-              # --- Patch 3: KMSDRM_CreateWindow invertierte Pruefung ---
-              if "NZP_KMSDRM_CREATEWINDOW_FIX" not in t:
-                  pat = re.compile(
-                      r"(ret = KMSDRM_CreateSurfaces\(_this,\s*window\);\s*)\n"
-                      r"(\s*if\s*\(ret\s*==\s*0\)\s*\{\s*)\n"
-                      r"(\s*if\s*\(ret\s*!=\s*0\)\s*\{\s*return\s+SDL_SetError\(\"Can't window GBM/EGL surfaces on window creation\.\"\);.*?\n)",
-                      re.DOTALL,
-                  )
-                  m = pat.search(t)
-                  if m:
-                      repl = (
-                          "/* NZP_KMSDRM_CREATEWINDOW_FIX: invertierte Pruefung korrigiert */\n"
-                          "    " + m.group(1).strip() + "\n"
-                          "    if (ret != 0) {\n"
-                          "        return SDL_SetError(\"Can't window GBM/EGL surfaces on window creation.\");\n"
-                          "    }"
-                      )
-                      t = t[:m.start()] + repl + t[m.end():]
-                      f_vid.write_text(t)
-                      print("OK: KMSDRM_CreateWindow invertierte Pruefung korrigiert")
-                  else:
-                      print("WARNUNG: KMSDRM_CreateWindow-Muster nicht gefunden")
-              else:
-                  print("KMSDRM_CreateWindow bereits gepatcht")
-
-              # --- Patch 4: gbm_device_get_fd() Workaround fuer libmali ---
-              if "NZP_GBM_DEVICE_FD_WORKAROUND" not in t:
-                  pat = re.compile(
-                      r"(dispdata->gbm\s*=\s*KMSDRM_gbm_create_device\s*\([^;]+\);)",
-                      re.DOTALL,
-                  )
-                  m = pat.search(t)
-                  if m:
-                      repl = (
-                          m.group(1) + "\n"
-                          "    /* NZP_GBM_DEVICE_FD_WORKAROUND: libmali dupliziert den fd */\n"
-                          "    if (dispdata->gbm) {\n"
-                          "        dispdata->drm_fd = KMSDRM_gbm_device_get_fd(dispdata->gbm);\n"
-                          "    }"
-                      )
-                      t = t[:m.start()] + repl + t[m.end():]
-                      f_vid.write_text(t)
-                      print("OK: gbm_device_get_fd Workaround eingefuegt")
-                  else:
-                      print("WARNUNG: gbm_create_device-Muster nicht gefunden")
-              else:
-                  print("gbm_device_get_fd Workaround bereits vorhanden")
           PYEOF
 
           cat > "$RUNNER_TEMP/nzp-build/patch_kmsdrm_orig.py" << 'PYEOF'
-          # Behaelt die urspruenglichen KMSDRM-Patches (Window-Flag, Pageflip)
+          # Behält die ursprünglichen KMSDRM-Patches (Window-Flag, Pageflip) für das Startskript
           import sys, re, pathlib
           path = pathlib.Path(sys.argv[1] + "/src/video/kmsdrm/SDL_kmsdrmvideo.c")
           t = path.read_text()
@@ -228,7 +282,6 @@ jobs:
           export PKG_CONFIG_LIBDIR=/usr/local/lib/pkgconfig:/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
           export PKG_CONFIG_SYSROOT_DIR=/
 
-          # SDL2 2.30.11 (enthaelt KMSDRM-Fixes; Mali-Patches kommen on top)
           SDL2_VER="2.30.11"
           cd /tmp
           wget -q "https://github.com/libsdl-org/SDL/releases/download/release-${SDL2_VER}/SDL2-${SDL2_VER}.tar.gz"
@@ -319,7 +372,7 @@ jobs:
           ln -sf libSDL2-2.0.so.0 libSDL2-2.0.so || true
 
           echo "=== Patch-Marker in libSDL2-2.0.so.0 ==="
-          strings libSDL2-2.0.so.0 | grep -E "NZP-M9|NZP_MALI" || echo "WARNUNG: Patch-Marker nicht gefunden!"
+          strings libSDL2-2.0.so.0 | grep -E "NZP-M9|NZP_MALI|NZP_KMSDRM" || echo "WARNUNG: Patch-Marker nicht gefunden!"
           echo "=== Fertig ==="
           ls -la nzportablearm64* libSDL2-2.0.so* 2>/dev/null || true
           BUILDEOF
