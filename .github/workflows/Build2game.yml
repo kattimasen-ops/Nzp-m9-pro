@@ -75,87 +75,117 @@ jobs:
 
           cat > "$RUNNER_TEMP/nzp-build/patch_sdl_kmsdrm.py" << 'PYEOF'
           import sys, pathlib
-
           path = pathlib.Path(sys.argv[1] + "/src/video/kmsdrm/SDL_kmsdrmvideo.c")
           text = path.read_text()
 
           if "NZP_GBM_FORMAT_AUTODETECT" in text:
               print("already patched"); sys.exit(0)
 
-          # 1) Format-Deklaration durch Auto-Detect-Block ersetzen
           old_decl = "uint32_t surface_fmt = GBM_FORMAT_ARGB8888;"
           if old_decl not in text:
               print("ERROR: surface_fmt declaration not found"); sys.exit(1)
 
-          new_decl = """uint32_t surface_fmt = 0; /* NZP_GBM_FORMAT_AUTODETECT */
-              {
-                  static const uint32_t nzp_gbm_formats[] = {
-                      GBM_FORMAT_XRGB8888, GBM_FORMAT_ARGB8888,
-                      GBM_FORMAT_RGB565,   GBM_FORMAT_BGR565,
-                      GBM_FORMAT_XBGR8888, GBM_FORMAT_ABGR8888,
-                      GBM_FORMAT_RGBX8888, GBM_FORMAT_RGBA8888,
-                      GBM_FORMAT_BGRX8888, GBM_FORMAT_BGRA8888
-                  };
-                  int nzp_i;
-                  for (nzp_i = 0; nzp_i < (int)(sizeof(nzp_gbm_formats)/sizeof(nzp_gbm_formats[0])); nzp_i++) {
-                      if (KMSDRM_gbm_device_is_format_supported(viddata->gbm_dev,
-                                                               nzp_gbm_formats[nzp_i], surface_flags)) {
-                          surface_fmt = nzp_gbm_formats[nzp_i];
-                          SDL_Log("NZP: using GBM format 0x%08x", surface_fmt);
-                          break;
-                      }
-                  }
-                  if (surface_fmt == 0) {
-                      surface_fmt = GBM_FORMAT_ARGB8888;
-                      SDL_LogWarn(SDL_LOG_CATEGORY_VIDEO, "NZP: no GBM format reported supported, fallback ARGB8888");
-                  }
-              }"""
+          new_lines = [
+              "uint32_t surface_fmt = 0; /* NZP_GBM_FORMAT_AUTODETECT */",
+              "{",
+              "    static const uint32_t nzp_gbm_formats[] = {",
+              "        GBM_FORMAT_XRGB8888, GBM_FORMAT_ARGB8888,",
+              "        GBM_FORMAT_RGB565,   GBM_FORMAT_BGR565,",
+              "        GBM_FORMAT_XBGR8888, GBM_FORMAT_ABGR8888,",
+              "        GBM_FORMAT_RGBX8888, GBM_FORMAT_RGBA8888,",
+              "        GBM_FORMAT_BGRX8888, GBM_FORMAT_BGRA8888",
+              "    };",
+              "    int nzp_i;",
+              "    for (nzp_i = 0; nzp_i < (int)(sizeof(nzp_gbm_formats)/sizeof(nzp_gbm_formats[0])); nzp_i++) {",
+              "        if (KMSDRM_gbm_device_is_format_supported(viddata->gbm_dev,",
+              "                                                nzp_gbm_formats[nzp_i], surface_flags)) {",
+              "            surface_fmt = nzp_gbm_formats[nzp_i];",
+              "            SDL_Log(\"NZP: using GBM format 0x%08x\", surface_fmt);",
+              "            break;",
+              "        }",
+              "    }",
+              "    if (surface_fmt == 0) {",
+              "        surface_fmt = GBM_FORMAT_ARGB8888;",
+              "        SDL_LogWarn(SDL_LOG_CATEGORY_VIDEO, \"NZP: no GBM format supported, fallback ARGB8888\");",
+              "    }",
+              "}",
+          ]
+          new_decl = "\n".join(new_lines)
 
           text = text.replace(old_decl, new_decl, 1)
           print("OK: GBM format autodetect patched")
 
-          # 2) Alten "Trying anyway"-Warnblock entfernen
-          old_warn = """    if (!KMSDRM_gbm_device_is_format_supported(viddata->gbm_dev,
-                                               surface_fmt, surface_flags)) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_VIDEO,
-                    "GBM surface format not supported. Trying anyway.");
-    }
-"""
+          old_warn_lines = [
+              "    if (!KMSDRM_gbm_device_is_format_supported(viddata->gbm_dev,",
+              "                                               surface_fmt, surface_flags)) {",
+              "        SDL_LogWarn(SDL_LOG_CATEGORY_VIDEO,",
+              "                    \"GBM surface format not supported. Trying anyway.\");",
+              "    }",
+              "",
+          ]
+          old_warn = "\n".join(old_warn_lines)
           if old_warn in text:
               text = text.replace(old_warn, "", 1)
               print("OK: removed old 'Trying anyway' warning")
-          else:
-              print("note: old warning block not found")
 
-          # 3) KMSDRM_CreateWindow: echten Fehler loggen statt überschreiben
-          old_caller = """if (!KMSDRM_CreateSurfaces(_this, window)) {
-        return SDL_SetError("Can't window GBM/EGL surfaces on window creation.");
-    }"""
-          new_caller = """if (!KMSDRM_CreateSurfaces(_this, window)) {
-        SDL_LogError(SDL_LOG_CATEGORY_VIDEO, "NZP: KMSDRM_CreateSurfaces failed: %s", SDL_GetError());
-        return SDL_SetError("Can't window GBM/EGL surfaces on window creation.");
-    }"""
+          old_caller = "if (!KMSDRM_CreateSurfaces(_this, window)) {\n        return SDL_SetError(\"Can't window GBM/EGL surfaces on window creation.\");\n    }"
+          new_caller_lines = [
+              "if (!KMSDRM_CreateSurfaces(_this, window)) {",
+              "        SDL_LogError(SDL_LOG_CATEGORY_VIDEO, \"NZP: KMSDRM_CreateSurfaces failed: %s\", SDL_GetError());",
+              "        return SDL_SetError(\"Can't window GBM/EGL surfaces on window creation.\");",
+              "    }",
+          ]
+          new_caller = "\n".join(new_caller_lines)
           if old_caller in text:
               text = text.replace(old_caller, new_caller, 1)
               print("OK: KMSDRM_CreateWindow logs real error")
           else:
-              print("note: caller block not found (checking alt variant)")
-              old_caller2 = """if (KMSDRM_CreateSurfaces(_this, window) < 0) {
-        return SDL_SetError("Can't window GBM/EGL surfaces on window creation.");
-    }"""
-              if old_caller2 in text:
-                  new_caller2 = """if (KMSDRM_CreateSurfaces(_this, window) < 0) {
-        SDL_LogError(SDL_LOG_CATEGORY_VIDEO, "NZP: KMSDRM_CreateSurfaces failed: %s", SDL_GetError());
-        return SDL_SetError("Can't window GBM/EGL surfaces on window creation.");
-    }"""
-                  text = text.replace(old_caller2, new_caller2, 1)
-                  print("OK: KMSDRM_CreateWindow (alt variant) logs real error")
+              print("note: caller block pattern not found exactly")
 
           path.write_text(text)
           print("=== Verify patched source ===")
           for line in text.splitlines():
-              if "NZP_GBM_FORMAT_AUTODETECT" in line or "NZP: KMSDRM_CreateSurfaces failed" in line:
+              if "NZP_GBM_FORMAT_AUTODETECT" in line:
                   print("   ", line.strip())
+              if "NZP: KMSDRM_CreateSurfaces failed" in line:
+                  print("   ", line.strip())
+          PYEOF
+
+          cat > "$RUNNER_TEMP/nzp-build/patch_sdl_misc.py" << 'PYEOF'
+          import sys, pathlib, re
+          path = pathlib.Path(sys.argv[1] + "/src/video/kmsdrm/SDL_kmsdrmvideo.c")
+          t = path.read_text()
+          if "NZP-M9-KMSDRM-WINDOW-FLAG" not in t:
+              m = re.search(r"(window->driverdata\s*=\s*windata\s*;)", t, re.DOTALL)
+              if m:
+                  ins_lines = [
+                      "    /* NZP-M9-KMSDRM-WINDOW-FLAG */",
+                      "    if (!(window->flags & SDL_WINDOW_VULKAN)) {",
+                      "        window->flags |= SDL_WINDOW_OPENGL;",
+                      "    }",
+                      "",
+                      "",
+                  ]
+                  ins = "\n".join(ins_lines)
+                  t = t[:m.start()] + ins + t[m.start():]
+                  path.write_text(t); print("OK: Window-Flag Patch")
+          t = path.read_text()
+          if "NZP-M9-PAGEFLIP-FALLBACK" not in t:
+              m = re.search(r"(KMSDRM_drmModePageFlip\s*\([^;]+;)", t, re.DOTALL)
+              if m:
+                  fb_lines = [
+                      "",
+                      "    /* NZP-M9-PAGEFLIP-FALLBACK */",
+                      "    if (ret != 0 && (flip_flags & DRM_MODE_PAGE_FLIP_ASYNC)) {",
+                      "        viddata->async_pageflip_support = SDL_FALSE;",
+                      "        flip_flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;",
+                      "        ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id, fb_info->fb_id, flip_flags, &windata->waiting_for_flip);",
+                      "    }",
+                      "",
+                  ]
+                  fb = "\n".join(fb_lines)
+                  t = t[:m.end()] + fb + t[m.end():]
+                  path.write_text(t); print("OK: Pageflip-Fallback")
           PYEOF
 
           cat > "$RUNNER_TEMP/nzp-build/build.sh" << 'BUILDEOF'
@@ -196,8 +226,11 @@ jobs:
           echo "=== SDL KMSDRM Patch ==="
           python3 /tmp/patch_sdl_kmsdrm.py .
 
-          echo "=== Verify patched source (grep) ==="
-          grep -n "NZP_GBM_FORMAT_AUTODETECT\|NZP: KMSDRM_CreateSurfaces failed" src/video/kmsdrm/SDL_kmsdrmvideo.c | head -5
+          echo "=== SDL misc patches ==="
+          python3 /tmp/patch_sdl_misc.py .
+
+          echo "=== Verify patched source ==="
+          grep -n "NZP_GBM_FORMAT_AUTODETECT\|NZP: KMSDRM_CreateSurfaces failed" src/video/kmsdrm/SDL_kmsdrmvideo.c | head -5 || true
 
           CFLAGS="-fPIC -Wno-declaration-after-statement" \
           LDFLAGS="-L/usr/lib/aarch64-linux-gnu" \
@@ -217,7 +250,7 @@ jobs:
 
           echo "=== Verify binary markers ==="
           strings /usr/local/lib/libSDL2-2.0.so.0 | grep -E "NZP: using GBM format|NZP: KMSDRM_CreateSurfaces failed" | head -3 || \
-            { echo "FATAL: Marker nicht im Binary — Patch nicht angekommen!"; exit 1; }
+            { echo "FATAL: Marker nicht im Binary"; exit 1; }
 
           echo "=== SDL2 md5 ==="
           md5sum /usr/local/lib/libSDL2-2.0.so.0.3000.11
@@ -283,7 +316,7 @@ jobs:
           cd /workspace/engine/release
           ln -sf libSDL2-2.0.so.0 libSDL2-2.0.so || true
 
-          echo "=== FINAL SDL2 in release/ ==="
+          echo "=== FINAL ==="
           ls -la libSDL2-2.0.so* nzportablearm64*
           md5sum libSDL2-2.0.so.0.3000.11 nzportablearm64
           BUILDEOF
@@ -296,6 +329,7 @@ jobs:
             -v "$RUNNER_TEMP/nzp-build/patch_makefile.py:/tmp/patch_makefile.py:ro" \
             -v "$RUNNER_TEMP/nzp-build/patch_glvidegl.py:/tmp/patch_glvidegl.py:ro" \
             -v "$RUNNER_TEMP/nzp-build/patch_sdl_kmsdrm.py:/tmp/patch_sdl_kmsdrm.py:ro" \
+            -v "$RUNNER_TEMP/nzp-build/patch_sdl_misc.py:/tmp/patch_sdl_misc.py:ro" \
             -v "$RUNNER_TEMP/nzp-build/build.sh:/tmp/build.sh:ro" \
             -w /workspace \
             ubuntu:20.04 bash /tmp/build.sh
