@@ -45,66 +45,132 @@ jobs:
           p = pathlib.Path(sys.argv[1])
           text = p.read_text().replace("gl_vidlinuxglx.o", "gl_vidsdl.o")
           lines = text.splitlines()
-
           MCL_NEW  = "$(D3DGL_OBJS) $(GLQUAKE_OBJS) $(SOFTWARE_OBJS) gl_vidsdl.o gl_videgl.o snd_linux.o snd_sdl.o snd_pulse.o snd_alsa.o cd_sdl.o sys_sdl.o in_sdl.o"
           GLCL_NEW = "$(GL_OBJS) $(D3DGL_OBJS) $(GLQUAKE_OBJS) gl_vidsdl.o gl_videgl.o snd_linux.o snd_sdl.o snd_pulse.o snd_alsa.o cd_sdl.o sys_sdl.o in_sdl.o"
-
           for i, line in enumerate(lines):
-              s = line.lstrip()
-              indent = line[:len(line)-len(s)]
-
-              if s == "GLCFLAGS?=-DGLQUAKE" or s == "GLCFLAGS=-DGLQUAKE":
+              s = line.lstrip(); indent = line[:len(line)-len(s)]
+              if s in ("GLCFLAGS?=-DGLQUAKE", "GLCFLAGS=-DGLQUAKE"):
                   lines[i] = indent + "GLCFLAGS=-DGLQUAKE -DUSE_EGL -DEGLQUAKE"
-                  print(f"GLCFLAGS[{i+1}] hard-set")
-                  continue
-
-              if s.startswith("MCL_OBJS=") and "gl_vidwayland.o" in s:
+              elif s.startswith("MCL_OBJS=") and "gl_vidwayland.o" in s:
                   lines[i] = indent + "MCL_OBJS=" + MCL_NEW
-                  print(f"MCL_OBJS[{i+1}] -> SDL-only+audio")
-                  continue
-
-              if s.startswith("GLCL_OBJS=") and "gl_vidwayland.o" in s:
+              elif s.startswith("GLCL_OBJS=") and "gl_vidwayland.o" in s:
                   lines[i] = indent + "GLCL_OBJS=" + GLCL_NEW
-                  print(f"GLCL_OBJS[{i+1}] -> SDL-only+audio")
-                  continue
-
-              if s == "M_CFLAGS=$(VKCFLAGS) $(GL_CFLAGS) $(CLIENTLIBFLAGS)":
+              elif s == "M_CFLAGS=$(VKCFLAGS) $(GL_CFLAGS) $(CLIENTLIBFLAGS)":
                   lines[i] = indent + s + " -DUSE_EGL -DEGLQUAKE -DFTE_SDL"
-                  print(f"M_CFLAGS[{i+1}] += USE_EGL DEGLQUAKE")
-                  continue
-
-              if s.startswith("CL_CFLAGS=-DMULTITHREAD -DDYNAMIC_SDL"):
-                  new = s.replace("$(HAVE_EGL)", "-DUSE_EGL")
-                  if new != s:
-                      lines[i] = indent + new
-                      print(f"CL_CFLAGS[{i+1}] HAVE_EGL -> -DUSE_EGL")
-
-          p.write_text("\n".join(lines) + "\n")
-          print("Makefile patched")
+              elif s.startswith("CL_CFLAGS=-DMULTITHREAD -DDYNAMIC_SDL"):
+                  lines[i] = indent + s.replace("$(HAVE_EGL)", "-DUSE_EGL")
+          p.write_text("\n".join(lines) + "\n"); print("Makefile patched")
           PYEOF
 
           cat > "$RUNNER_TEMP/nzp-build/patch_glvidegl.py" << 'PYEOF'
           import sys, pathlib, re
-          p = pathlib.Path(sys.argv[1])
-          text = p.read_text()
-          text = re.sub(r"\n/\* NZP_EGL_FALLBACK_MARKER.*?#endif\n", "\n", text, flags=re.DOTALL)
-          text = re.sub(r"\n/\* NZP_EGL_WEAK_MARKER.*?eglrendererinfo = 0;\n", "\n", text, flags=re.DOTALL)
-
-          real_def = re.search(r"^(?!\s*extern)[^\n;]*\beglrendererinfo\s*(=|;)", text, re.MULTILINE)
-          if real_def:
-              print(f"eglrendererinfo already DEFINED: {real_def.group(0).strip()[:60]}")
-              sys.exit(0)
-
-          if "NZP_EGL_WEAK_MARKER" not in text:
-              stub = (
-                  "\n/* NZP_EGL_WEAK_MARKER: weak fallback so the engine links */\n"
-                  "__attribute__((weak)) char *eglrendererinfo = 0;\n"
-              )
-              p.write_text(text + stub)
+          p = pathlib.Path(sys.argv[1]); text = p.read_text()
+          text = re.sub(r"\n/\* NZP_EGL.*?\n", "\n", text, flags=re.DOTALL)
+          if not re.search(r"^(?!\s*extern)[^\n;]*\beglrendererinfo\s*(=|;)", text, re.MULTILINE):
+              p.write_text(text + "\n__attribute__((weak)) char *eglrendererinfo = 0;\n")
               print("eglrendererinfo weak stub ADDED")
+          else:
+              print("eglrendererinfo already defined")
           PYEOF
 
-          cat > "$RUNNER_TEMP/nzp-build/patch_kmsdrm.py" << 'PYEOF'
+          # NEU: Mali-spezifische SDL-Patches
+          cat > "$RUNNER_TEMP/nzp-build/patch_sdl_mali.py" << 'PYEOF'
+          import sys, pathlib, re
+
+          base = pathlib.Path(sys.argv[1])
+
+          # --- Patch 1: eglGetPlatformDisplayEXT (Mali-Kompatibilitaet) ---
+          f_egl = base / "src/video/kmsdrm/SDL_kmsdrmopengles.c"
+          if f_egl.exists():
+              t = f_egl.read_text()
+              if "NZP_MALI_EGL_PLATFORM" not in t:
+                  # Suche den eglGetDisplay-Aufruf und fuege Platform-Display davor ein
+                  pat = re.compile(r"(eglGetDisplay\s*\([^)]*\))", re.DOTALL)
+                  m = pat.search(t)
+                  if m:
+                      repl = (
+                          "/* NZP_MALI_EGL_PLATFORM: Mali braucht eglGetPlatformDisplayEXT */\n"
+                          "    {\n"
+                          "        PFNEGLGETPLATFORMDISPLAYEXTPROC getPlatformDisplay =\n"
+                          "            (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress(\"eglGetPlatformDisplayEXT\");\n"
+                          "        if (getPlatformDisplay) {\n"
+                          "            display = getPlatformDisplay(EGL_PLATFORM_GBM_KHR, gbm_dev, NULL);\n"
+                          "        }\n"
+                          "    }\n"
+                          "    if (display == EGL_NO_DISPLAY) {\n"
+                          "        display = " + m.group(1).strip() + ";\n"
+                          "    }"
+                      )
+                      t = t[:m.start()] + repl + t[m.end():]
+                      f_egl.write_text(t)
+                      print("OK: eglGetPlatformDisplayEXT-Fallback in SDL_kmsdrmopengles.c")
+                  else:
+                      print("WARNUNG: eglGetDisplay nicht gefunden")
+              else:
+                  print("eglGetPlatformDisplayEXT bereits gepatcht")
+
+          # --- Patch 2: GBM-Format (Mali erwartet GBM_FORMAT_XRGB8888) ---
+          f_vid = base / "src/video/kmsdrm/SDL_kmsdrmvideo.c"
+          if f_vid.exists():
+              t = f_vid.read_text()
+              if "GBM_BO_FORMAT_XRGB8888" in t:
+                  t = t.replace("GBM_BO_FORMAT_XRGB8888", "GBM_FORMAT_XRGB8888")
+                  f_vid.write_text(t)
+                  print("OK: GBM_BO_FORMAT_XRGB8888 -> GBM_FORMAT_XRGB8888")
+              else:
+                  print("GBM_BO_FORMAT_XRGB8888 nicht gefunden (bereits korrekt)")
+
+              # --- Patch 3: KMSDRM_CreateWindow invertierte Pruefung ---
+              if "NZP_KMSDRM_CREATEWINDOW_FIX" not in t:
+                  pat = re.compile(
+                      r"(ret = KMSDRM_CreateSurfaces\(_this,\s*window\);\s*)\n"
+                      r"(\s*if\s*\(ret\s*==\s*0\)\s*\{\s*)\n"
+                      r"(\s*if\s*\(ret\s*!=\s*0\)\s*\{\s*return\s+SDL_SetError\(\"Can't window GBM/EGL surfaces on window creation\.\"\);.*?\n)",
+                      re.DOTALL,
+                  )
+                  m = pat.search(t)
+                  if m:
+                      repl = (
+                          "/* NZP_KMSDRM_CREATEWINDOW_FIX: invertierte Pruefung korrigiert */\n"
+                          "    " + m.group(1).strip() + "\n"
+                          "    if (ret != 0) {\n"
+                          "        return SDL_SetError(\"Can't window GBM/EGL surfaces on window creation.\");\n"
+                          "    }"
+                      )
+                      t = t[:m.start()] + repl + t[m.end():]
+                      f_vid.write_text(t)
+                      print("OK: KMSDRM_CreateWindow invertierte Pruefung korrigiert")
+                  else:
+                      print("WARNUNG: KMSDRM_CreateWindow-Muster nicht gefunden")
+              else:
+                  print("KMSDRM_CreateWindow bereits gepatcht")
+
+              # --- Patch 4: gbm_device_get_fd() Workaround fuer libmali ---
+              if "NZP_GBM_DEVICE_FD_WORKAROUND" not in t:
+                  pat = re.compile(
+                      r"(dispdata->gbm\s*=\s*KMSDRM_gbm_create_device\s*\([^;]+\);)",
+                      re.DOTALL,
+                  )
+                  m = pat.search(t)
+                  if m:
+                      repl = (
+                          m.group(1) + "\n"
+                          "    /* NZP_GBM_DEVICE_FD_WORKAROUND: libmali dupliziert den fd */\n"
+                          "    if (dispdata->gbm) {\n"
+                          "        dispdata->drm_fd = KMSDRM_gbm_device_get_fd(dispdata->gbm);\n"
+                          "    }"
+                      )
+                      t = t[:m.start()] + repl + t[m.end():]
+                      f_vid.write_text(t)
+                      print("OK: gbm_device_get_fd Workaround eingefuegt")
+                  else:
+                      print("WARNUNG: gbm_create_device-Muster nicht gefunden")
+              else:
+                  print("gbm_device_get_fd Workaround bereits vorhanden")
+          PYEOF
+
+          cat > "$RUNNER_TEMP/nzp-build/patch_kmsdrm_orig.py" << 'PYEOF'
+          # Behaelt die urspruenglichen KMSDRM-Patches (Window-Flag, Pageflip)
           import sys, re, pathlib
           path = pathlib.Path(sys.argv[1] + "/src/video/kmsdrm/SDL_kmsdrmvideo.c")
           t = path.read_text()
@@ -117,7 +183,7 @@ jobs:
                          "    }\n"
                          "    SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO, \"NZP-M9-WINDOW-FLAG-ACTIVE\");\n\n")
                   t = t[:m.start()] + ins + t[m.start():]
-                  path.write_text(t); print("OK: KMSDRM Window-Flag Patch angewendet.")
+                  path.write_text(t); print("OK: Window-Flag Patch")
           t = path.read_text()
           if "NZP-M9-PAGEFLIP-FALLBACK" not in t:
               m = re.search(r"(KMSDRM_drmModePageFlip\s*\([^;]+;)", t, re.DOTALL)
@@ -130,7 +196,7 @@ jobs:
                         "        ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id, fb_info->fb_id, flip_flags, &windata->waiting_for_flip);\n"
                         "    }\n")
                   t = t[:m.end()] + fb + t[m.end():]
-                  path.write_text(t); print("OK: Pageflip-Fallback eingefügt.")
+                  path.write_text(t); print("OK: Pageflip-Fallback")
           PYEOF
 
           cat > "$RUNNER_TEMP/nzp-build/build.sh" << 'BUILDEOF'
@@ -162,13 +228,16 @@ jobs:
           export PKG_CONFIG_LIBDIR=/usr/local/lib/pkgconfig:/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
           export PKG_CONFIG_SYSROOT_DIR=/
 
-          # SDL2 2.30.11: enthaelt KMSDRM-Fix fuer RK3326 (Issue #10675, in 2.30.8 gemerged)
+          # SDL2 2.30.11 (enthaelt KMSDRM-Fixes; Mali-Patches kommen on top)
           SDL2_VER="2.30.11"
           cd /tmp
           wget -q "https://github.com/libsdl-org/SDL/releases/download/release-${SDL2_VER}/SDL2-${SDL2_VER}.tar.gz"
           tar xf "SDL2-${SDL2_VER}.tar.gz"
           cd "SDL2-${SDL2_VER}"
-          python3 /tmp/patch_kmsdrm.py .
+
+          echo "=== Mali-SDL-Patches anwenden ==="
+          python3 /tmp/patch_sdl_mali.py .
+          python3 /tmp/patch_kmsdrm_orig.py .
 
           CFLAGS="-fPIC -Wno-declaration-after-statement" \
           LDFLAGS="-L/usr/lib/aarch64-linux-gnu" \
@@ -193,7 +262,6 @@ jobs:
           wget -q -O zlib-1.3.1.tar.gz \
             "https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz"
           gzip -t zlib-1.3.1.tar.gz || { echo "FATAL: zlib kein gzip"; exit 1; }
-          ls -la zlib-1.3.1.tar.gz
 
           echo "=== Patch pr_cmds.c ==="
           python3 /tmp/patch_prcmds.py /workspace/engine/server/pr_cmds.c
@@ -202,12 +270,10 @@ jobs:
           python3 /tmp/patch_makefile.py /workspace/engine/Makefile
           grep -n "^GLCFLAGS" /workspace/engine/Makefile | head -3 || true
           grep -n "^[[:space:]]*MCL_OBJS=.*snd_pulse" /workspace/engine/Makefile || true
-          grep -n "M_CFLAGS=.*USE_EGL" /workspace/engine/Makefile | head -3 || true
-          grep -n "gl_vidlinuxglx.o" /workspace/engine/Makefile || echo "OK: keine Reste"
 
           echo "=== Patch gl_videgl.c ==="
           python3 /tmp/patch_glvidegl.py /workspace/engine/gl/gl_videgl.c
-          tail -5 /workspace/engine/gl/gl_videgl.c || true
+          tail -3 /workspace/engine/gl/gl_videgl.c || true
 
           export CC=aarch64-linux-gnu-gcc CXX=aarch64-linux-gnu-g++ AR=aarch64-linux-gnu-ar RANLIB=aarch64-linux-gnu-ranlib STRIP=aarch64-linux-gnu-strip
           export PKGCONFIG=/usr/bin/aarch64-linux-gnu-pkg-config
@@ -227,7 +293,6 @@ jobs:
           echo "=== makelibs ==="
           time make makelibs FTE_TARGET=linux_arm64
 
-          echo "=== Engine-Objekte löschen ==="
           rm -rf /workspace/engine/release/m_linuxarm64
 
           echo "=== Engine cross-kompilieren ==="
@@ -252,8 +317,9 @@ jobs:
           cp -a /usr/local/lib/libSDL2.so  /workspace/engine/release/ || true
           cd /workspace/engine/release
           ln -sf libSDL2-2.0.so.0 libSDL2-2.0.so || true
+
           echo "=== Patch-Marker in libSDL2-2.0.so.0 ==="
-          strings libSDL2-2.0.so.0 | grep "NZP-M9" || echo "WARNUNG: Patch-Marker nicht gefunden!"
+          strings libSDL2-2.0.so.0 | grep -E "NZP-M9|NZP_MALI" || echo "WARNUNG: Patch-Marker nicht gefunden!"
           echo "=== Fertig ==="
           ls -la nzportablearm64* libSDL2-2.0.so* 2>/dev/null || true
           BUILDEOF
@@ -265,7 +331,8 @@ jobs:
             -v "$RUNNER_TEMP/nzp-build/patch_prcmds.py:/tmp/patch_prcmds.py:ro" \
             -v "$RUNNER_TEMP/nzp-build/patch_makefile.py:/tmp/patch_makefile.py:ro" \
             -v "$RUNNER_TEMP/nzp-build/patch_glvidegl.py:/tmp/patch_glvidegl.py:ro" \
-            -v "$RUNNER_TEMP/nzp-build/patch_kmsdrm.py:/tmp/patch_kmsdrm.py:ro" \
+            -v "$RUNNER_TEMP/nzp-build/patch_sdl_mali.py:/tmp/patch_sdl_mali.py:ro" \
+            -v "$RUNNER_TEMP/nzp-build/patch_kmsdrm_orig.py:/tmp/patch_kmsdrm_orig.py:ro" \
             -v "$RUNNER_TEMP/nzp-build/build.sh:/tmp/build.sh:ro" \
             -w /workspace \
             ubuntu:20.04 bash /tmp/build.sh
