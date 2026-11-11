@@ -74,127 +74,105 @@ jobs:
           PYEOF
 
           cat > "$RUNNER_TEMP/nzp-build/patch_sdl_kmsdrm.py" << 'PYEOF'
-          import sys, pathlib, re
+          import sys, pathlib
           path = pathlib.Path(sys.argv[1] + "/src/video/kmsdrm/SDL_kmsdrmvideo.c")
           text = path.read_text()
 
-          if "NZP_GBM_FORMAT_AUTODETECT_HELPER" in text:
+          if "NZP_GBM_FORMAT_AUTODETECT" in text:
               print("already patched"); sys.exit(0)
 
-          # ---- Line-based search for function definition ----
-          lines = text.split('\n')
-          fn_start_idx = None
-          for i, line in enumerate(lines):
-              if 'KMSDRM_CreateSurfaces' in line:
-                  chunk = '\n'.join(lines[i:i+8])
-                  if 'SDL_VideoDevice' in chunk:
-                      for j in range(i, max(-1, i-12), -1):
-                          if re.search(r'\bbool\b|\bSDL_bool\b', lines[j]):
-                              fn_start_idx = j
-                              break
-                      if fn_start_idx is not None:
-                          break
-
-          if fn_start_idx is None:
-              print("ERROR: KMSDRM_CreateSurfaces definition not found (line-based)")
-              sys.exit(1)
-
-          # Compute insertion position for helper
-          char_pos = sum(len(l) + 1 for l in lines[:fn_start_idx])
-          helper_lines = [
-              "/* NZP_GBM_FORMAT_AUTODETECT_HELPER */",
-              "static uint32_t",
-              "NZP_ChooseGBMFormat(SDL_VideoData *viddata)",
-              "{",
-              "    const uint32_t surface_flags = GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING;",
-              "    static const uint32_t nzp_gbm_formats[] = {",
-              "        GBM_FORMAT_XRGB8888, GBM_FORMAT_ARGB8888,",
-              "        GBM_FORMAT_RGB565,   GBM_FORMAT_BGR565,",
-              "        GBM_FORMAT_XBGR8888, GBM_FORMAT_ABGR8888,",
-              "        GBM_FORMAT_RGBX8888, GBM_FORMAT_RGBA8888,",
-              "        GBM_FORMAT_BGRX8888, GBM_FORMAT_BGRA8888",
-              "    };",
-              "    int nzp_i;",
-              "    for (nzp_i = 0; nzp_i < (int)(sizeof(nzp_gbm_formats)/sizeof(nzp_gbm_formats[0])); nzp_i++) {",
-              "        if (KMSDRM_gbm_device_is_format_supported(viddata->gbm_dev,",
-              "                                                  nzp_gbm_formats[nzp_i], surface_flags)) {",
-              "            SDL_Log(\"NZP: using GBM format 0x%08x\", nzp_gbm_formats[nzp_i]);",
-              "            return nzp_gbm_formats[nzp_i];",
-              "        }",
-              "    }",
-              "    SDL_LogWarn(SDL_LOG_CATEGORY_VIDEO, \"NZP: no GBM format supported, fallback ARGB8888\");",
-              "    return GBM_FORMAT_ARGB8888;",
-              "}",
-              "",
-              "",
-          ]
-          helper = "\n".join(helper_lines)
-          text = text[:char_pos] + helper + text[char_pos:]
-          print("OK: helper NZP_ChooseGBMFormat eingefuegt (line %d)" % (fn_start_idx + 1))
-
-          # ---- Re-read lines after helper insertion ----
           lines = text.split('\n')
 
-          # Find surface_fmt line and surface_flags line
+          # ---- 1) surface_fmt-Deklaration finden ----
           sf_idx = None
           for i, line in enumerate(lines):
               if 'uint32_t surface_fmt = GBM_FORMAT_ARGB8888;' in line:
                   sf_idx = i
                   break
           if sf_idx is None:
-              print("ERROR: surface_fmt line not found"); sys.exit(1)
+              print("ERROR: surface_fmt declaration not found"); sys.exit(1)
           indent = lines[sf_idx][:len(lines[sf_idx]) - len(lines[sf_idx].lstrip())]
-          lines[sf_idx] = indent + "uint32_t surface_fmt = NZP_ChooseGBMFormat(viddata);"
-          print("OK: surface_fmt -> NZP_ChooseGBMFormat")
+          print("OK: surface_fmt line found at index %d" % sf_idx)
 
-          # ---- Collect late declarations to move up ----
-          # Find end of surface_flags line
+          # surface_fmt -> Deklaration ohne Init
+          lines[sf_idx] = indent + "uint32_t surface_fmt;"
+
+          # ---- 2) surface_flags finden (muss kurz danach kommen) ----
           flags_idx = None
-          for i in range(sf_idx, min(sf_idx + 5, len(lines))):
-              if 'surface_flags' in lines[i] and '=' in lines[i]:
+          for i in range(sf_idx, min(sf_idx + 10, len(lines))):
+              if 'uint32_t surface_flags' in lines[i]:
                   flags_idx = i
                   break
           if flags_idx is None:
               print("ERROR: surface_flags line not found"); sys.exit(1)
+          print("OK: surface_flags line found at index %d" % flags_idx)
 
-          # Search region: from after flags to next 'cleanup:' or end of function
-          # We move these declarations: EGLContext egl_context, bool result = false
-          late_decl_patterns = [
-              re.compile(r"^\s*EGLContext\s+egl_context\s*;\s*$"),
-              re.compile(r"^\s*bool\s+result\s*=\s*false\s*;\s*$"),
-              re.compile(r"^\s*SDL_bool\s+result\s*=\s*SDL_FALSE\s*;\s*$"),
-              re.compile(r"^\s*bool\s+result\s*;\s*$"),
-          ]
-          moved = []
-          new_lines = []
+          # ---- 3) Späte Deklarationen sammeln und entfernen ----
+          late_decls = []
+          late_idxs = []
+          for i in range(flags_idx + 1, len(lines)):
+              stripped = lines[i].strip()
+              if not stripped:
+                  continue
+              # EGLContext egl_context;
+              if "EGLContext egl_context" in stripped and stripped.endswith(";"):
+                  late_decls.append(lines[i])
+                  late_idxs.append(i)
+                  print("OK: found late decl 'EGLContext egl_context' at index %d" % i)
+              # bool result = false;  /  bool result;
+              elif "bool result" in stripped and stripped.endswith(";"):
+                  late_decls.append(lines[i])
+                  late_idxs.append(i)
+                  print("OK: found late decl 'bool result' at index %d" % i)
+
+          # Entferne die späten Deklarationen (von hinten nach vorne, um Indizes nicht zu verschieben)
+          for i in sorted(late_idxs, reverse=True):
+              del lines[i]
+
+          # ---- 4) flags_idx nach dem Löschen neu berechnen ----
+          flags_idx = None
           for i, line in enumerate(lines):
-              if i > flags_idx:
-                  matched = False
-                  for pat in late_decl_patterns:
-                      if pat.match(line):
-                          moved.append(line.rstrip())
-                          matched = True
-                          break
-                  if matched:
-                      continue
-              new_lines.append(line)
-          lines = new_lines
+              if 'uint32_t surface_flags' in line:
+                  flags_idx = i
+                  break
+          if flags_idx is None:
+              print("ERROR: surface_flags not found after removing late decls"); sys.exit(1)
 
-          if moved:
-              # Insert moved declarations right after flags line (recompute flags_idx)
-              flags_idx = None
-              for i, line in enumerate(lines):
-                  if 'surface_flags' in line and '=' in line:
-                      flags_idx = i
-                      break
-              if flags_idx is not None:
-                  insert = moved
-                  lines = lines[:flags_idx+1] + insert + lines[flags_idx+1:]
-                  print("OK: %d Deklaration(en) nach oben verschoben: %s" % (len(moved), ", ".join(m.strip() for m in moved)))
+          # ---- 5) Einfügeblock zusammenbauen: late_decls + Auto-Detect ----
+          insert_lines = []
+          for decl in late_decls:
+              insert_lines.append(decl)
+          if late_decls:
+              insert_lines.append("")
+
+          insert_lines.append(indent + "/* NZP_GBM_FORMAT_AUTODETECT */")
+          insert_lines.append(indent + "{")
+          insert_lines.append(indent + "    static const uint32_t nzp_gbm_formats[] = {")
+          insert_lines.append(indent + "        GBM_FORMAT_XRGB8888, GBM_FORMAT_ARGB8888,")
+          insert_lines.append(indent + "        GBM_FORMAT_RGB565,   GBM_FORMAT_BGR565,")
+          insert_lines.append(indent + "        GBM_FORMAT_XBGR8888, GBM_FORMAT_ABGR8888,")
+          insert_lines.append(indent + "        GBM_FORMAT_RGBX8888, GBM_FORMAT_RGBA8888,")
+          insert_lines.append(indent + "        GBM_FORMAT_BGRX8888, GBM_FORMAT_BGRA8888")
+          insert_lines.append(indent + "    };")
+          insert_lines.append(indent + "    int nzp_i;")
+          insert_lines.append(indent + "    surface_fmt = GBM_FORMAT_ARGB8888; /* fallback */")
+          insert_lines.append(indent + "    for (nzp_i = 0; nzp_i < (int)(sizeof(nzp_gbm_formats)/sizeof(nzp_gbm_formats[0])); nzp_i++) {")
+          insert_lines.append(indent + "        if (KMSDRM_gbm_device_is_format_supported(viddata->gbm_dev,")
+          insert_lines.append(indent + "                                                  nzp_gbm_formats[nzp_i], surface_flags)) {")
+          insert_lines.append(indent + "            surface_fmt = nzp_gbm_formats[nzp_i];")
+          insert_lines.append(indent + "            SDL_Log(\"NZP: using GBM format 0x%08x\", surface_fmt);")
+          insert_lines.append(indent + "            break;")
+          insert_lines.append(indent + "        }")
+          insert_lines.append(indent + "    }")
+          insert_lines.append(indent + "}")
+
+          # ---- 6) Nach surface_flags einfügen ----
+          lines = lines[:flags_idx + 1] + insert_lines + lines[flags_idx + 1:]
 
           text = '\n'.join(lines)
 
-          # ---- Remove old "Trying anyway" warning block ----
+          # ---- 7) Alten "Trying anyway"-Warnblock entfernen ----
+          import re
           warn_pattern = re.compile(
               r"[ \t]*if\s*\(!KMSDRM_gbm_device_is_format_supported\s*\([^)]*\)\s*\)\s*\{\s*\n"
               r"[ \t]*SDL_LogWarn\s*\(\s*SDL_LOG_CATEGORY_VIDEO\s*,\s*\n?"
@@ -206,7 +184,7 @@ jobs:
               text = new_text
               print("OK: removed old 'Trying anyway' warning")
 
-          # ---- KMSDRM_CreateWindow: log real error ----
+          # ---- 8) KMSDRM_CreateWindow: echten Fehler loggen ----
           caller_pattern = re.compile(
               r"if\s*\(\s*!KMSDRM_CreateSurfaces\s*\(\s*_this\s*,\s*window\s*\)\s*\)\s*\{\s*\n"
               r"([ \t]*)return\s+SDL_SetError\s*\(\s*\"Can't window GBM/EGL surfaces on window creation\.\"\s*\)\s*;\s*\n"
@@ -225,19 +203,17 @@ jobs:
 
           path.write_text(text)
 
-          # ---- Verify: print first lines of KMSDRM_CreateSurfaces ----
-          print("=== Verify: erste 20 Zeilen von KMSDRM_CreateSurfaces ===")
+          # ---- 9) Verifikation: Bereich um surface_fmt herum ausgeben ----
+          print("=== Verify: 30 Zeilen ab surface_fmt ===")
           verify_lines = text.split('\n')
-          in_fn = False
-          count = 0
+          start = None
           for i, line in enumerate(verify_lines):
-              if 'KMSDRM_CreateSurfaces' in line and not line.strip().startswith('/*'):
-                  in_fn = True
-              if in_fn:
+              if 'uint32_t surface_fmt;' in line:
+                  start = i
+                  break
+          if start is not None:
+              for line in verify_lines[max(0, start-3):start + 30]:
                   print("   ", line)
-                  count += 1
-                  if count >= 20:
-                      break
           PYEOF
 
           cat > "$RUNNER_TEMP/nzp-build/patch_sdl_misc.py" << 'PYEOF'
@@ -309,7 +285,7 @@ jobs:
           python3 /tmp/patch_sdl_misc.py .
 
           echo "=== Verify patched source (grep) ==="
-          grep -n "NZP_ChooseGBMFormat\|NZP: KMSDRM_CreateSurfaces failed\|EGLContext egl_context" src/video/kmsdrm/SDL_kmsdrmvideo.c | head -8 || true
+          grep -n "NZP_GBM_FORMAT_AUTODETECT\|NZP: KMSDRM_CreateSurfaces failed\|EGLContext egl_context" src/video/kmsdrm/SDL_kmsdrmvideo.c | head -8 || true
 
           CFLAGS="-fPIC -Wno-declaration-after-statement" \
           LDFLAGS="-L/usr/lib/aarch64-linux-gnu" \
