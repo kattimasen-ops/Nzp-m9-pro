@@ -74,80 +74,89 @@ jobs:
           PYEOF
 
           cat > "$RUNNER_TEMP/nzp-build/patch_sdl_kmsdrm.py" << 'PYEOF'
-          import sys, pathlib
+          import sys, pathlib, re
           path = pathlib.Path(sys.argv[1] + "/src/video/kmsdrm/SDL_kmsdrmvideo.c")
           text = path.read_text()
 
           if "NZP_GBM_FORMAT_AUTODETECT" in text:
               print("already patched"); sys.exit(0)
 
-          old_decl = "uint32_t surface_fmt = GBM_FORMAT_ARGB8888;"
-          if old_decl not in text:
-              print("ERROR: surface_fmt declaration not found"); sys.exit(1)
+          # Match beide Deklarationen zusammen (surface_fmt vor surface_flags)
+          pattern = re.compile(
+              r"(?P<indent>[ \t]*)uint32_t\s+surface_fmt\s*=\s*GBM_FORMAT_ARGB8888\s*;\s*\n"
+              r"(?P=indent)uint32_t\s+surface_flags\s*=\s*GBM_BO_USE_SCANOUT\s*\|\s*GBM_BO_USE_RENDERING\s*;",
+          )
+          m = pattern.search(text)
+          if not m:
+              print("ERROR: surface_fmt/surface_flags block not found in SDL_kmsdrmvideo.c")
+              sys.exit(1)
 
-          new_lines = [
-              "uint32_t surface_fmt = 0; /* NZP_GBM_FORMAT_AUTODETECT */",
-              "{",
-              "    static const uint32_t nzp_gbm_formats[] = {",
-              "        GBM_FORMAT_XRGB8888, GBM_FORMAT_ARGB8888,",
-              "        GBM_FORMAT_RGB565,   GBM_FORMAT_BGR565,",
-              "        GBM_FORMAT_XBGR8888, GBM_FORMAT_ABGR8888,",
-              "        GBM_FORMAT_RGBX8888, GBM_FORMAT_RGBA8888,",
-              "        GBM_FORMAT_BGRX8888, GBM_FORMAT_BGRA8888",
-              "    };",
-              "    int nzp_i;",
-              "    for (nzp_i = 0; nzp_i < (int)(sizeof(nzp_gbm_formats)/sizeof(nzp_gbm_formats[0])); nzp_i++) {",
-              "        if (KMSDRM_gbm_device_is_format_supported(viddata->gbm_dev,",
-              "                                                nzp_gbm_formats[nzp_i], surface_flags)) {",
-              "            surface_fmt = nzp_gbm_formats[nzp_i];",
-              "            SDL_Log(\"NZP: using GBM format 0x%08x\", surface_fmt);",
-              "            break;",
-              "        }",
-              "    }",
-              "    if (surface_fmt == 0) {",
-              "        surface_fmt = GBM_FORMAT_ARGB8888;",
-              "        SDL_LogWarn(SDL_LOG_CATEGORY_VIDEO, \"NZP: no GBM format supported, fallback ARGB8888\");",
-              "    }",
-              "}",
+          indent = m.group("indent")
+          replacement_lines = [
+              indent + "uint32_t surface_fmt = 0;",
+              indent + "uint32_t surface_flags = GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING;",
+              indent,
+              indent + "/* NZP_GBM_FORMAT_AUTODETECT */",
+              indent + "{",
+              indent + "    static const uint32_t nzp_gbm_formats[] = {",
+              indent + "        GBM_FORMAT_XRGB8888, GBM_FORMAT_ARGB8888,",
+              indent + "        GBM_FORMAT_RGB565,   GBM_FORMAT_BGR565,",
+              indent + "        GBM_FORMAT_XBGR8888, GBM_FORMAT_ABGR8888,",
+              indent + "        GBM_FORMAT_RGBX8888, GBM_FORMAT_RGBA8888,",
+              indent + "        GBM_FORMAT_BGRX8888, GBM_FORMAT_BGRA8888",
+              indent + "    };",
+              indent + "    int nzp_i;",
+              indent + "    for (nzp_i = 0; nzp_i < (int)(sizeof(nzp_gbm_formats)/sizeof(nzp_gbm_formats[0])); nzp_i++) {",
+              indent + "        if (KMSDRM_gbm_device_is_format_supported(viddata->gbm_dev,",
+              indent + "                                                  nzp_gbm_formats[nzp_i], surface_flags)) {",
+              indent + "            surface_fmt = nzp_gbm_formats[nzp_i];",
+              indent + "            SDL_Log(\"NZP: using GBM format 0x%08x\", surface_fmt);",
+              indent + "            break;",
+              indent + "        }",
+              indent + "    }",
+              indent + "    if (surface_fmt == 0) {",
+              indent + "        surface_fmt = GBM_FORMAT_ARGB8888;",
+              indent + "        SDL_LogWarn(SDL_LOG_CATEGORY_VIDEO, \"NZP: no GBM format supported, fallback ARGB8888\");",
+              indent + "    }",
+              indent + "}",
           ]
-          new_decl = "\n".join(new_lines)
+          replacement = "\n".join(replacement_lines)
+          text = text[:m.start()] + replacement + text[m.end():]
+          print("OK: GBM format autodetect patched (C90-safe)")
 
-          text = text.replace(old_decl, new_decl, 1)
-          print("OK: GBM format autodetect patched")
-
-          old_warn_lines = [
-              "    if (!KMSDRM_gbm_device_is_format_supported(viddata->gbm_dev,",
-              "                                               surface_fmt, surface_flags)) {",
-              "        SDL_LogWarn(SDL_LOG_CATEGORY_VIDEO,",
-              "                    \"GBM surface format not supported. Trying anyway.\");",
-              "    }",
-              "",
-          ]
-          old_warn = "\n".join(old_warn_lines)
-          if old_warn in text:
-              text = text.replace(old_warn, "", 1)
+          # Alten Warnblock "Trying anyway" entfernen
+          warn_pattern = re.compile(
+              r"[ \t]*if\s*\(!KMSDRM_gbm_device_is_format_supported\s*\([^)]*\)\s*\)\s*\{\s*\n"
+              r"[ \t]*SDL_LogWarn\s*\(\s*SDL_LOG_CATEGORY_VIDEO\s*,\s*\n?"
+              r"[ \t]*\"GBM surface format not supported\. Trying anyway\.\"\s*\)\s*;\s*\n"
+              r"[ \t]*\}\s*\n",
+          )
+          new_text = warn_pattern.sub("", text, count=1)
+          if new_text != text:
+              text = new_text
               print("OK: removed old 'Trying anyway' warning")
 
-          old_caller = "if (!KMSDRM_CreateSurfaces(_this, window)) {\n        return SDL_SetError(\"Can't window GBM/EGL surfaces on window creation.\");\n    }"
-          new_caller_lines = [
-              "if (!KMSDRM_CreateSurfaces(_this, window)) {",
-              "        SDL_LogError(SDL_LOG_CATEGORY_VIDEO, \"NZP: KMSDRM_CreateSurfaces failed: %s\", SDL_GetError());",
-              "        return SDL_SetError(\"Can't window GBM/EGL surfaces on window creation.\");",
-              "    }",
-          ]
-          new_caller = "\n".join(new_caller_lines)
-          if old_caller in text:
-              text = text.replace(old_caller, new_caller, 1)
+          # KMSDRM_CreateWindow: echten Fehler loggen
+          caller_pattern = re.compile(
+              r"if\s*\(\s*!KMSDRM_CreateSurfaces\s*\(\s*_this\s*,\s*window\s*\)\s*\)\s*\{\s*\n"
+              r"([ \t]*)return\s+SDL_SetError\s*\(\s*\"Can't window GBM/EGL surfaces on window creation\.\"\s*\)\s*;\s*\n"
+              r"[ \t]*\}",
+          )
+          def caller_repl(m):
+              ind = m.group(1)
+              return ("if (!KMSDRM_CreateSurfaces(_this, window)) {\n"
+                      + ind + "SDL_LogError(SDL_LOG_CATEGORY_VIDEO, \"NZP: KMSDRM_CreateSurfaces failed: %s\", SDL_GetError());\n"
+                      + ind + "return SDL_SetError(\"Can't window GBM/EGL surfaces on window creation.\");\n"
+                      + "    }")
+          new_text, n = caller_pattern.subn(caller_repl, text, count=1)
+          if n > 0:
+              text = new_text
               print("OK: KMSDRM_CreateWindow logs real error")
-          else:
-              print("note: caller block pattern not found exactly")
 
           path.write_text(text)
           print("=== Verify patched source ===")
           for line in text.splitlines():
-              if "NZP_GBM_FORMAT_AUTODETECT" in line:
-                  print("   ", line.strip())
-              if "NZP: KMSDRM_CreateSurfaces failed" in line:
+              if "NZP_GBM_FORMAT_AUTODETECT" in line or "NZP: KMSDRM_CreateSurfaces failed" in line:
                   print("   ", line.strip())
           PYEOF
 
@@ -158,32 +167,22 @@ jobs:
           if "NZP-M9-KMSDRM-WINDOW-FLAG" not in t:
               m = re.search(r"(window->driverdata\s*=\s*windata\s*;)", t, re.DOTALL)
               if m:
-                  ins_lines = [
-                      "    /* NZP-M9-KMSDRM-WINDOW-FLAG */",
-                      "    if (!(window->flags & SDL_WINDOW_VULKAN)) {",
-                      "        window->flags |= SDL_WINDOW_OPENGL;",
-                      "    }",
-                      "",
-                      "",
-                  ]
-                  ins = "\n".join(ins_lines)
+                  ins = ("    /* NZP-M9-KMSDRM-WINDOW-FLAG */\n"
+                         "    if (!(window->flags & SDL_WINDOW_VULKAN)) {\n"
+                         "        window->flags |= SDL_WINDOW_OPENGL;\n"
+                         "    }\n\n")
                   t = t[:m.start()] + ins + t[m.start():]
                   path.write_text(t); print("OK: Window-Flag Patch")
           t = path.read_text()
           if "NZP-M9-PAGEFLIP-FALLBACK" not in t:
               m = re.search(r"(KMSDRM_drmModePageFlip\s*\([^;]+;)", t, re.DOTALL)
               if m:
-                  fb_lines = [
-                      "",
-                      "    /* NZP-M9-PAGEFLIP-FALLBACK */",
-                      "    if (ret != 0 && (flip_flags & DRM_MODE_PAGE_FLIP_ASYNC)) {",
-                      "        viddata->async_pageflip_support = SDL_FALSE;",
-                      "        flip_flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;",
-                      "        ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id, fb_info->fb_id, flip_flags, &windata->waiting_for_flip);",
-                      "    }",
-                      "",
-                  ]
-                  fb = "\n".join(fb_lines)
+                  fb = ("\n    /* NZP-M9-PAGEFLIP-FALLBACK */\n"
+                        "    if (ret != 0 && (flip_flags & DRM_MODE_PAGE_FLIP_ASYNC)) {\n"
+                        "        viddata->async_pageflip_support = SDL_FALSE;\n"
+                        "        flip_flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;\n"
+                        "        ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id, fb_info->fb_id, flip_flags, &windata->waiting_for_flip);\n"
+                        "    }\n")
                   t = t[:m.end()] + fb + t[m.end():]
                   path.write_text(t); print("OK: Pageflip-Fallback")
           PYEOF
