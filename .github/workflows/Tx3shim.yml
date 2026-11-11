@@ -55,7 +55,7 @@ jobs:
           int __system_property_get(const char *name, char *value) {
               if (!name || !value) return 0;
               if (strcmp(name, "ro.build.version.sdk") == 0) {
-                  strcpy(value, "19"); // Android KitKat (API 19 aus deinen Logs)
+                  strcpy(value, "19"); // Android KitKat (API 19)
                   return 2;
               }
               if (strcmp(name, "ro.product.model") == 0) {
@@ -69,21 +69,26 @@ jobs:
 
       - name: Compile 32-bit Shared Library
         run: |
-          arm-linux-gnueabihf-gcc -shared -fPIC -O3 -Wall -Wextra shim.c -o libstrlcpy_shim.so
-          file libstrlcpy_shim.so
+          mkdir -p output/bin
+          arm-linux-gnueabihf-gcc -shared -fPIC -O3 -Wall -Wextra shim.c -o output/bin/libstrlcpy_shim.so
+          # Kopie auch ins Root für Fallback-Suchen
+          cp output/bin/libstrlcpy_shim.so output/libstrlcpy_shim.so
+          file output/bin/libstrlcpy_shim.so
 
       - name: Generate Patched Trial Xtreme 3.sh
         run: |
-          cat << 'EOF' > "Trial Xtreme 3.sh"
+          cat << 'EOF' > "output/Trial Xtreme 3.sh"
           #!/bin/bash
-          # Port made by Mega & Auto-Patched with Shim Fix
+          # Port made by Mega & Auto-Patched with Shim Fix for M9 Pro / ArkOS
           export PORT_32BIT=Y
           capture_arm(){
            [ -z "${LD_LIBRARY_PATH:-}" ] || export TX3_ARM_LIBPATH="${TX3_ARM_LIBPATH:+$TX3_ARM_LIBPATH:}$LD_LIBRARY_PATH"
            [ -z "${ALSA_PLUGIN_DIR:-}" ] || export TX3_ARM_ALSA="$ALSA_PLUGIN_DIR"
            [ -z "${PIPEWIRE_MODULE_DIR:-}" ] || export TX3_ARM_PIPEWIRE="$PIPEWIRE_MODULE_DIR"
            [ -z "${SPA_PLUGIN_DIR:-}" ] || export TX3_ARM_SPA="$SPA_PLUGIN_DIR"
-           unset LD_LIBRARY_PATH LD_PRELOAD LD_AUDIT SDL_VIDEO_EGL_DRIVER SDL_VIDEO_GL_DRIVER
+           # WICHTIG: LD_PRELOAD erhalten, aber für 32-bit Runtime anpassen!
+           [ -n "${LD_PRELOAD:-}" ] && export TX3_SAVED_LD_PRELOAD="$LD_PRELOAD"
+           unset LD_LIBRARY_PATH LD_AUDIT SDL_VIDEO_EGL_DRIVER SDL_VIDEO_GL_DRIVER
            unset ALSA_PLUGIN_DIR ALSA_CONFIG_PATH PIPEWIRE_MODULE_DIR SPA_PLUGIN_DIR
           }
           capture_arm
@@ -91,26 +96,29 @@ jobs:
 
           valid_port(){ [ -f "$1/tools/run.py" ] && [ -f "$1/tools/install.py" ] && [ -f "$1/bin/ua_host" ]; }
           port=""
-          for candidate in "$script_dir/trialxtreme3" "${TX3_PORT_DIR:-}" "${GAMEDIR:-}" /mnt/mmc/ports/trialxtreme3 /mnt/mmc/ROMS/Ports/trialxtreme3 /mnt/mmc/roms/ports/trialxtreme3 /mnt/sdcard/ports/trialxtreme3 /mnt/sdcard/ROMS/Ports/trialxtreme3 /mnt/sdcard/roms/ports/trialxtreme3 /mnt/SDCARD/Ports/trialxtreme3 /roms/ports/trialxtreme3 /roms2/ports/trialxtreme3 /userdata/roms/ports/trialxtreme3; do
+          for candidate in "$script_dir/trialxtreme3" "${TX3_PORT_DIR:-}" "${GAMEDIR:-}" /roms/ports/trialxtreme3 /roms2/ports/trialxtreme3 /mnt/mmc/ports/trialxtreme3 /mnt/sdcard/ports/trialxtreme3; do
            if [ -n "$candidate" ] && valid_port "$candidate"; then port="$candidate"; break; fi
           done
           if [ -z "$port" ]; then
            mkdir -p "$script_dir/trialxtreme3/logs" || exit 1
-           printf 'Trial Xtreme 3 test10: pasta completa do port nao encontrada.\nLauncher: %s\nInstale a pasta trialxtreme3 do ZIP junto ao launcher ou em ports do SD1/SD2. Preservar payload e saves.\n' "$script_dir" >> "$script_dir/trialxtreme3/logs/bootstrap.log"
+           printf 'Trial Xtreme 3: Port-Ordner nicht gefunden.\n' >> "$script_dir/trialxtreme3/logs/bootstrap.log"
            exit 1
-          fi
-          mkdir -p "$port/logs" || exit 1
+          end
+          mkdir -p "$port/logs" "$port/bin" || exit 1
           exec >>"$port/logs/bootstrap.log" 2>&1
-          printf '\nTrial Xtreme 3 test10 startup\n'
+          printf '\nTrial Xtreme 3 M9 Pro startup\n'
           printf '[launcher] script=%s; port=%s\n' "$script_dir" "$port"
-          if [ "$(wc -c < "$port/logs/bootstrap.log")" -gt 65536 ]; then
-           tail -c 32768 "$port/logs/bootstrap.log" > "$port/logs/.bootstrap-tail"
-           cat "$port/logs/.bootstrap-tail" > "$port/logs/bootstrap.log"
-           python3 -c 'import os,sys;os.unlink(sys.argv[1])' "$port/logs/.bootstrap-tail"
+
+          # Shim-Bibliothek zwingend in den Port-Bin-Ordner synchronisieren
+          if [ -f "$script_dir/bin/libstrlcpy_shim.so" ]; then
+              cp -f "$script_dir/bin/libstrlcpy_shim.so" "$port/bin/"
+          elif [ -f "$script_dir/libstrlcpy_shim.so" ]; then
+              cp -f "$script_dir/libstrlcpy_shim.so" "$port/bin/"
           fi
+
           trialxtreme3_port_saved="$port"
           controlfolder=""
-          for candidate in "${TX3_PM_DIR:-}" /opt/system/Tools/PortMaster /opt/tools/PortMaster /roms/ports/PortMaster /roms2/ports/PortMaster /mnt/mmc/ports/PortMaster /mnt/sdcard/ports/PortMaster /mnt/sdcard/ROMS/Ports/PortMaster /mnt/SDCARD/Ports/PortMaster /userdata/roms/ports/PortMaster /storage/.config/PortMaster /var/data/PortMaster /PortMaster /roms/tools/PortMaster /roms2/tools/PortMaster /userdata/system/.local/share/PortMaster /mnt/mmc/MUOS/PortMaster "${XDG_DATA_HOME:-$HOME/.local/share}/PortMaster"; do
+          for candidate in "${TX3_PM_DIR:-}" /opt/system/Tools/PortMaster /opt/tools/PortMaster /roms/ports/PortMaster /roms2/ports/PortMaster; do
            if [ -f "$candidate/control.txt" ]; then controlfolder="$candidate"; break; fi
           done
           if [ -n "$controlfolder" ]; then
@@ -127,17 +135,14 @@ jobs:
           export SDL_GAMECONTROLLER_USE_BUTTON_LABELS=0
           export CFW_NAME="${CFW_NAME:-}" GAMEDIR="$port"
 
-          # SHIM FIX FOR M9 PRO / GLIBC ARMHF:
+          # ROBUSTE EINBINDUNG DES SHIMS FÜR DEN 32-BIT LAUFWELT-WRAPPER:
           if [ -f "$port/bin/libstrlcpy_shim.so" ]; then
-              export LD_PRELOAD="$port/bin/libstrlcpy_shim.so${LD_PRELOAD:+:$LD_PRELOAD}"
-              printf '[shim] LD_PRELOAD=%s\n' "$LD_PRELOAD"
-          elif [ -f "$script_dir/libstrlcpy_shim.so" ]; then
-              export LD_PRELOAD="$script_dir/libstrlcpy_shim.so${LD_PRELOAD:+:$LD_PRELOAD}"
-              printf '[shim] LD_PRELOAD=%s\n' "$LD_PRELOAD"
+              export LD_PRELOAD="$port/bin/libstrlcpy_shim.so${TX3_SAVED_LD_PRELOAD:+:$TX3_SAVED_LD_PRELOAD}"
+              printf '[shim] LD_PRELOAD erfolgreich gesetzt: %s\n' "$LD_PRELOAD"
           fi
 
           python_bin="$(command -v python3)"
-          if [ -z "$python_bin" ]; then printf 'Python 3 nativo ausente.\n'; exit 1; fi
+          if [ -z "$python_bin" ]; then printf 'Python 3 fehlt.\n'; exit 1; fi
           supervisor_pid="";finished=0
           cleanup(){
            [ "$finished" = 0 ] || return
@@ -157,25 +162,12 @@ jobs:
           trap 'exit 143' TERM
           trap 'exit 130' INT
           trap 'exit 129' HUP
-          export TX3_MUOS=0
-          case "${CFW_NAME,,}" in muos*) TX3_MUOS=1 ;; esac
-          [ ! -d /opt/muos ] || TX3_MUOS=1
-          if [ "$TX3_MUOS" = 1 ]; then
-           source "$port/tools/muos-audio.sh"
-           start_muos_audio
-          fi
+          
           "$python_bin" "$port/tools/run.py" "$port" & supervisor_pid=$!
           wait "$supervisor_pid";status=$?;supervisor_pid=""
           exit "$status"
           EOF
-          chmod +x "Trial Xtreme 3.sh"
-
-      - name: Create Output Package
-        run: |
-          mkdir -p output/bin
-          cp libstrlcpy_shim.so output/bin/
-          cp libstrlcpy_shim.so output/
-          cp "Trial Xtreme 3.sh" output/
+          chmod +x "output/Trial Xtreme 3.sh"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
