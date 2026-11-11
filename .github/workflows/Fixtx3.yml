@@ -1,0 +1,110 @@
+name: Auto-Patch Trial Xtreme 3 Binary
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - '**/*.so'
+      - '**/*.apk'
+      - '.github/workflows/patch-tx3.yml'
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Install Dependencies (patchelf & Cross-Compiler)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y patchelf gcc-arm-linux-gnueabihf
+
+      - name: Compile 32-bit strlcpy & Property Shim
+        run: |
+          cat << 'EOF' > shim.c
+          #define _GNU_SOURCE
+          #include <stddef.h>
+          #include <string.h>
+          #include <stdio.h>
+          #include <stdlib.h>
+
+          size_t strlcpy(char *dst, const char *src, size_t size) {
+              size_t srclen = strlen(src);
+              if (size > 0) {
+                  size_t copylen = (srclen >= size) ? size - 1 : srclen;
+                  memcpy(dst, src, copylen);
+                  dst[copylen] = '\0';
+              }
+              return srclen;
+          }
+
+          size_t strlcat(char *dst, const char *src, size_t size) {
+              size_t dstlen = strlen(dst);
+              size_t srclen = strlen(src);
+              if (dstlen >= size) {
+                  return size + srclen;
+              }
+              size_t copylen = size - dstlen - 1;
+              if (srclen < copylen) {
+                  copylen = srclen;
+              }
+              memcpy(dst + dstlen, src, copylen);
+              dst[dstlen + copylen] = '\0';
+              return dstlen + srclen;
+          }
+
+          int __system_property_get(const char *name, char *value) {
+              if (!name || !value) return 0;
+              if (strcmp(name, "ro.build.version.sdk") == 0) {
+                  strcpy(value, "19");
+                  return 2;
+              }
+              if (strcmp(name, "ro.product.model") == 0) {
+                  strcpy(value, "M9 Pro");
+                  return 6;
+              }
+              value[0] = '\0';
+              return 0;
+          }
+          EOF
+          arm-linux-gnueabihf-gcc -shared -fPIC -O3 shim.c -o libstrlcpy_shim.so
+          file libstrlcpy_shim.so
+
+      - name: Place Shim and Patch libmono.so
+        run: |
+          # Zielordner für Binärdateien ermitteln (sucht nach bin/ oder trialxtreme3/)
+          TARGET_DIR=$(find . -type d \( -name "bin" -o -name "trialxtreme3" \) | head -n 1)
+          if [ -z "$TARGET_DIR" ]; then
+            TARGET_DIR="bin"
+            mkdir -p "$TARGET_DIR"
+          fi
+          
+          # Shim in den Bin-Ordner kopieren
+          cp libstrlcpy_shim.so "$TARGET_DIR/libstrlcpy_shim.so"
+          echo "Shim kopiert nach: $TARGET_DIR/libstrlcpy_shim.so"
+
+          # libmono.so im Repository suchen
+          MONO_SO=$(find . -name "libmono.so" | head -n 1)
+          if [ -n "$MONO_SO" ]; then
+            echo "Gefundenes libmono.so unter: $MONO_SO"
+            
+            # Mit patchelf als benötigte Abhängigkeit hinzufügen
+            patchelf --add-needed libstrlcpy_shim.so "$MONO_SO"
+            
+            echo "Erfolgreich gepatched! Abhängigkeiten prüfen:"
+            patchelf --print-needed "$MONO_SO"
+          else
+            echo "Fehler: libmono.so wurde im Repository nicht gefunden!"
+            exit 1
+          fi
+
+      - name: Commit and Push Patched Files
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "Auto-patch: Compile shim and patch libmono.so with patchelf" || echo "No changes to commit"
+          git push
