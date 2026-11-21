@@ -107,43 +107,59 @@ jobs:
               print("WARN: invertierte Pruefung nicht gefunden (evtl. bereits korrekt)")
           text = '\n'.join(lines)
 
-          # --- 4b) Format-Autodetect (falls noch nicht vorhanden) ---
-          old_fmt = "uint32_t surface_fmt = GBM_FORMAT_ARGB8888;"
-          if old_fmt in text:
-              new_lines = [
-                  "uint32_t surface_fmt = 0; /* NZP: format autodetect */",
-                  "{",
-                  "    static const uint32_t nzp_gbm_formats[] = {",
-                  "        GBM_FORMAT_XRGB8888, GBM_FORMAT_ARGB8888,",
-                  "        GBM_FORMAT_RGB565,   GBM_FORMAT_BGR565,",
-                  "        GBM_FORMAT_XBGR8888, GBM_FORMAT_ABGR8888,",
-                  "        GBM_FORMAT_RGBX8888, GBM_FORMAT_RGBA8888,",
-                  "        GBM_FORMAT_BGRX8888, GBM_FORMAT_BGRA8888",
-                  "    };",
-                  "    int nzp_i;",
-                  "    for (nzp_i = 0; nzp_i < (int)(sizeof(nzp_gbm_formats)/sizeof(nzp_gbm_formats[0])); nzp_i++) {",
-                  "        if (KMSDRM_gbm_device_is_format_supported(viddata->gbm_dev,",
-                  "                                                  nzp_gbm_formats[nzp_i], surface_flags)) {",
-                  "            surface_fmt = nzp_gbm_formats[nzp_i];",
-                  "            SDL_Log(\"NZP: using GBM format 0x%08x\", surface_fmt);",
-                  "            break;",
-                  "        }",
-                  "    }",
-                  "    if (surface_fmt == 0) {",
-                  "        surface_fmt = GBM_FORMAT_XRGB8888;",
-                  "        SDL_LogWarn(SDL_LOG_CATEGORY_VIDEO, \"NZP: no format supported, fallback XRGB8888\");",
-                  "    }",
-                  "}",
-              ]
-              text = text.replace(old_fmt, "\n".join(new_lines), 1)
-              print("OK: Format-Autodetect eingefuegt")
-          elif "NZP: format autodetect" in text:
+          # --- 4b) Format-Autodetect (SDL 2.30.10 Layout: surface_flags kommt NACH surface_fmt) ---
+          if "NZP: format autodetect" in text:
               print("already format-autodetect")
+          else:
+              # Ersetze den kompletten Deklarationsblock und fuege den Autodetect-Block
+              # erst NACH allen Deklarationen ein (C90-konform).
+              decl_re = re.compile(
+                  r"(\s*)uint32_t\s+surface_fmt\s*=\s*GBM_FORMAT_ARGB8888\s*;\s*\n"
+                  r"\s*uint32_t\s+surface_flags\s*=\s*GBM_BO_USE_SCANOUT\s*\|\s*GBM_BO_USE_RENDERING\s*;\s*\n"
+                  r"\s*uint32_t\s+width,\s*height\s*;\s*\n"
+                  r"\s*EGLContext\s+egl_context\s*;\s*\n"
+                  r"\s*int\s+ret\s*=\s*0\s*;"
+              )
+              m = decl_re.search(text)
+              if m:
+                  indent = m.group(1)  # Einrueckung (typisch 4 Leerzeichen)
+                  replacement = (
+                      indent + "uint32_t surface_fmt = 0; /* NZP: format autodetect */\n"
+                      + indent + "uint32_t surface_flags = GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING;\n"
+                      + indent + "uint32_t width, height;\n"
+                      + indent + "EGLContext egl_context;\n"
+                      + indent + "int ret = 0;\n"
+                      + "\n"
+                      + indent + "/* NZP: format autodetect */\n"
+                      + indent + "{\n"
+                      + indent + "    static const uint32_t nzp_gbm_formats[] = {\n"
+                      + indent + "        GBM_FORMAT_XRGB8888, GBM_FORMAT_ARGB8888,\n"
+                      + indent + "        GBM_FORMAT_RGB565,   GBM_FORMAT_BGR565,\n"
+                      + indent + "        GBM_FORMAT_XBGR8888, GBM_FORMAT_ABGR8888,\n"
+                      + indent + "        GBM_FORMAT_RGBX8888, GBM_FORMAT_RGBA8888,\n"
+                      + indent + "        GBM_FORMAT_BGRX8888, GBM_FORMAT_BGRA8888\n"
+                      + indent + "    };\n"
+                      + indent + "    int nzp_i;\n"
+                      + indent + "    for (nzp_i = 0; nzp_i < (int)(sizeof(nzp_gbm_formats)/sizeof(nzp_gbm_formats[0])); nzp_i++) {\n"
+                      + indent + "        if (KMSDRM_gbm_device_is_format_supported(viddata->gbm_dev,\n"
+                      + indent + "                                                  nzp_gbm_formats[nzp_i], surface_flags)) {\n"
+                      + indent + "            surface_fmt = nzp_gbm_formats[nzp_i];\n"
+                      + indent + "            SDL_Log(\"NZP: using GBM format 0x%08x\", surface_fmt);\n"
+                      + indent + "            break;\n"
+                      + indent + "        }\n"
+                      + indent + "    }\n"
+                      + indent + "    if (surface_fmt == 0) {\n"
+                      + indent + "        surface_fmt = GBM_FORMAT_XRGB8888;\n"
+                      + indent + "        SDL_LogWarn(SDL_LOG_CATEGORY_VIDEO, \"NZP: no format supported, fallback XRGB8888\");\n"
+                      + indent + "    }\n"
+                      + indent + "}\n"
+                  )
+                  text = text[:m.start()] + replacement + text[m.end():]
+                  print("OK: Format-Autodetect eingefuegt (SDL 2.30.10 Layout)")
+              else:
+                  print("WARN: Format-Deklarationsblock nicht gefunden (evtl. bereits gepatcht)")
 
           # --- 4c) Async page flip deaktivieren (RK3326 Mali Workaround) ---
-          # Der Mali-G31-Treiber wirbt mit DRM_CAP_ASYNC_PAGE_FLIP, lehnt den
-          # tatsaechlichen asynchronen Flip aber mit -EINVAL ab -> schwarzer
-          # Bildschirm. Wir zwingen async_pageflip_support auf SDL_FALSE.
           if "NZP_ASYNC_DISABLED" not in text:
               replaced = 0
               for pat in [r"viddata->async_pageflip_support\s*=\s*support\s*;",
