@@ -74,49 +74,73 @@ jobs:
           PYEOF
 
           cat > "$RUNNER_TEMP/nzp-build/patch_sdl_mali.py" << 'PYEOF'
-          import sys, pathlib
-          path = pathlib.Path(sys.argv[1] + "/src/video/kmsdrm/SDL_kmsdrmvideo.c")
-          text = path.read_text()
+          import sys, pathlib, re
 
-          # Mali G31 erwartet XRGB8888, nicht ARGB8888
+          vid = pathlib.Path(sys.argv[1] + "/src/video/kmsdrm/SDL_kmsdrmvideo.c")
+          text = vid.read_text()
+
+          # 1) GBM_FORMAT_XRGB8888 (Mali G31, Bug 3792)
           old_fmt = "uint32_t surface_fmt = GBM_FORMAT_ARGB8888;"
           new_fmt = "uint32_t surface_fmt = GBM_FORMAT_XRGB8888; /* NZP: Mali G31 */"
           if old_fmt in text:
               text = text.replace(old_fmt, new_fmt, 1)
-              print("OK: ARGB8888 -> XRGB8888")
+              print("OK: GBM_FORMAT_ARGB8888 -> XRGB8888")
           elif new_fmt in text:
               print("already XRGB8888")
-          else:
-              print("WARN: surface_fmt line not found")
 
-          # Echten Fehler loggen
+          # 2) libmali gbm_device_get_fd() Workaround
+          if "NZP_LIBMALI_FD_FIX" not in text:
+              pat = re.compile(r"(dispdata->gbm\s*=\s*KMSDRM_gbm_create_device\s*\([^;]+\);)")
+              m = pat.search(text)
+              if m:
+                  repl = (m.group(1) + "\n"
+                          "    /* NZP_LIBMALI_FD_FIX: libmali duplicates fd on gbm_device_get_fd() */\n"
+                          "    if (dispdata->gbm) {\n"
+                          "        dispdata->drm_fd = KMSDRM_gbm_device_get_fd(dispdata->gbm);\n"
+                          "    }")
+                  text = text[:m.start()] + repl + text[m.end():]
+                  print("OK: libmali gbm_device_get_fd() workaround")
+
+          # 3) Echten Fehler loggen
           old_caller = "if (!KMSDRM_CreateSurfaces(_this, window)) {\n        return SDL_SetError(\"Can't window GBM/EGL surfaces on window creation.\");\n    }"
-          new_caller = "if (!KMSDRM_CreateSurfaces(_this, window)) {\n        SDL_LogError(SDL_LOG_CATEGORY_VIDEO, \"NZP: KMSDRM_CreateSurfaces failed: %s\", SDL_GetError());\n        return SDL_SetError(\"Can't window GBM/EGL surfaces on window creation.\");\n    }"
+          new_caller = ("if (!KMSDRM_CreateSurfaces(_this, window)) {\n"
+                        "        SDL_LogError(SDL_LOG_CATEGORY_VIDEO, \"NZP: KMSDRM_CreateSurfaces failed: %s\", SDL_GetError());\n"
+                        "        return SDL_SetError(\"Can't window GBM/EGL surfaces on window creation.\");\n"
+                        "    }")
           if old_caller in text:
               text = text.replace(old_caller, new_caller, 1)
               print("OK: KMSDRM_CreateWindow logs real error")
           elif "NZP: KMSDRM_CreateSurfaces failed" in text:
               print("already logs error")
-          else:
-              print("WARN: caller pattern not found")
 
-          path.write_text(text)
-          PYEOF
+          vid.write_text(text)
 
-          cat > "$RUNNER_TEMP/nzp-build/patch_makefile_werror.py" << 'PYEOF'
-          import sys, pathlib
-          p = pathlib.Path(sys.argv[1])
-          if not p.exists():
-              print("WARN: %s not found" % p); sys.exit(0)
-          t = p.read_text()
-          orig = t
-          t = t.replace("-Werror=declaration-after-statement", "")
-          t = t.replace("-Wdeclaration-after-statement", "")
-          if t != orig:
-              p.write_text(t)
-              print("OK: stripped C90 flags from Makefile")
-          else:
-              print("NOTE: nothing to strip")
+          # 4) eglGetPlatformDisplayEXT für Mali (falls nicht in 2.30.11)
+          egl = pathlib.Path(sys.argv[1] + "/src/video/kmsdrm/SDL_kmsdrmopengles.c")
+          if egl.exists():
+              et = egl.read_text()
+              if "NZP_MALI_EGL_PLATFORM" not in et:
+                  pat = re.compile(r"(eglGetDisplay\s*\([^)]*\))")
+                  m = pat.search(et)
+                  if m:
+                      repl = ("/* NZP_MALI_EGL_PLATFORM: eglGetPlatformDisplayEXT for Mali */\n"
+                              "    {\n"
+                              "        PFNEGLGETPLATFORMDISPLAYEXTPROC getPlatformDisplay =\n"
+                              "            (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress(\"eglGetPlatformDisplayEXT\");\n"
+                              "        if (getPlatformDisplay) {\n"
+                              "            display = getPlatformDisplay(EGL_PLATFORM_GBM_KHR, gbm_dev, NULL);\n"
+                              "        }\n"
+                              "    }\n"
+                              "    if (display == EGL_NO_DISPLAY) {\n"
+                              "        display = " + m.group(1).strip() + ";\n"
+                              "    }")
+                      et = et[:m.start()] + repl + et[m.end():]
+                      egl.write_text(et)
+                      print("OK: eglGetPlatformDisplayEXT for Mali")
+                  else:
+                      print("WARN: eglGetDisplay not found")
+              else:
+                  print("eglGetPlatformDisplayEXT already present")
           PYEOF
 
           cat > "$RUNNER_TEMP/nzp-build/build.sh" << 'BUILDEOF'
@@ -148,24 +172,22 @@ jobs:
           export PKG_CONFIG_LIBDIR=/usr/local/lib/pkgconfig:/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
           export PKG_CONFIG_SYSROOT_DIR=/
 
-          # SDL2 2.30.3: bewährte Version für RK3326 / Mali-G31 (PortMaster-Stand)
-          SDL2_VER="2.30.3"
+          # SDL 2.30.11: enthält Issue #10675 Fix (KMSDRM_GetSym, RK3326)
+          SDL2_VER="2.30.11"
           cd /tmp
           wget -q "https://github.com/libsdl-org/SDL/releases/download/release-${SDL2_VER}/SDL2-${SDL2_VER}.tar.gz"
           tar xf "SDL2-${SDL2_VER}.tar.gz"
           cd "SDL2-${SDL2_VER}"
 
-          echo "=== SDL Mali Patch (Format + Logging) ==="
+          echo "=== SDL Mali Patches ==="
           python3 /tmp/patch_sdl_mali.py .
 
-          CFLAGS="-fPIC -Wno-declaration-after-statement" \
+          # C90-Werror entschärfen (SDL 2.30.11 hat latente C90-Verstöße)
+          CFLAGS="-fPIC -Wno-declaration-after-statement -Wno-error=declaration-after-statement" \
           LDFLAGS="-L/usr/lib/aarch64-linux-gnu" \
           ./configure --prefix=/usr/local --host=aarch64-linux-gnu \
             --enable-video-kmsdrm --disable-video-x11 --disable-video-wayland \
             --disable-video-vulkan --enable-video-opengles --enable-shared --disable-static
-
-          echo "=== Strip C90 Werror from SDL Makefile ==="
-          python3 /tmp/patch_makefile_werror.py Makefile
 
           make -j"$(nproc)"
           make install
@@ -180,8 +202,8 @@ jobs:
 
           echo "=== SDL2 checks ==="
           aarch64-linux-gnu-nm -D /usr/local/lib/libSDL2-2.0.so.0 | grep -q "KMSDRM_CreateSurfaces" && \
-            echo "OK: KMSDRM_CreateSurfaces exported" || echo "WARN: KMSDRM symbol not exported"
-          md5sum /usr/local/lib/libSDL2-2.0.so.0.3000.3
+            echo "OK: KMSDRM_CreateSurfaces exported"
+          md5sum /usr/local/lib/libSDL2-2.0.so.0.3000.11
 
           cd /workspace/engine
 
@@ -246,7 +268,7 @@ jobs:
 
           echo "=== FINAL ==="
           ls -la libSDL2-2.0.so* nzportablearm64*
-          md5sum libSDL2-2.0.so.0.3000.3 nzportablearm64
+          md5sum libSDL2-2.0.so.0.3000.11 nzportablearm64
           BUILDEOF
 
       - name: Cross-Compile in ubuntu:20.04
@@ -257,7 +279,6 @@ jobs:
             -v "$RUNNER_TEMP/nzp-build/patch_makefile.py:/tmp/patch_makefile.py:ro" \
             -v "$RUNNER_TEMP/nzp-build/patch_glvidegl.py:/tmp/patch_glvidegl.py:ro" \
             -v "$RUNNER_TEMP/nzp-build/patch_sdl_mali.py:/tmp/patch_sdl_mali.py:ro" \
-            -v "$RUNNER_TEMP/nzp-build/patch_makefile_werror.py:/tmp/patch_makefile_werror.py:ro" \
             -v "$RUNNER_TEMP/nzp-build/build.sh:/tmp/build.sh:ro" \
             -w /workspace \
             ubuntu:20.04 bash /tmp/build.sh
