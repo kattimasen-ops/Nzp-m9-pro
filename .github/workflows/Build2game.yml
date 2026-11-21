@@ -73,174 +73,51 @@ jobs:
               print("eglrendererinfo already defined")
           PYEOF
 
-          cat > "$RUNNER_TEMP/nzp-build/patch_sdl_kmsdrm.py" << 'PYEOF'
+          cat > "$RUNNER_TEMP/nzp-build/patch_sdl_simple.py" << 'PYEOF'
           import sys, pathlib
           path = pathlib.Path(sys.argv[1] + "/src/video/kmsdrm/SDL_kmsdrmvideo.c")
           text = path.read_text()
 
-          if "NZP_GBM_FORMAT_AUTODETECT" in text:
-              print("already patched"); sys.exit(0)
+          # 1) ARGB8888 -> XRGB8888 (Mali-Format)
+          old_fmt = "uint32_t surface_fmt = GBM_FORMAT_ARGB8888;"
+          new_fmt = "uint32_t surface_fmt = GBM_FORMAT_XRGB8888; /* NZP: Mali accepts XRGB8888 */"
+          if old_fmt in text:
+              text = text.replace(old_fmt, new_fmt, 1)
+              print("OK: ARGB8888 -> XRGB8888")
+          elif new_fmt in text:
+              print("already XRGB8888")
+          else:
+              print("WARN: surface_fmt line not found")
 
-          lines = text.split('\n')
-
-          # ---- 1) surface_fmt-Deklaration finden ----
-          sf_idx = None
-          for i, line in enumerate(lines):
-              if 'uint32_t surface_fmt = GBM_FORMAT_ARGB8888;' in line:
-                  sf_idx = i
-                  break
-          if sf_idx is None:
-              print("ERROR: surface_fmt declaration not found"); sys.exit(1)
-          indent = lines[sf_idx][:len(lines[sf_idx]) - len(lines[sf_idx].lstrip())]
-          print("OK: surface_fmt line found at index %d" % sf_idx)
-
-          # surface_fmt -> Deklaration ohne Init
-          lines[sf_idx] = indent + "uint32_t surface_fmt;"
-
-          # ---- 2) surface_flags finden (muss kurz danach kommen) ----
-          flags_idx = None
-          for i in range(sf_idx, min(sf_idx + 10, len(lines))):
-              if 'uint32_t surface_flags' in lines[i]:
-                  flags_idx = i
-                  break
-          if flags_idx is None:
-              print("ERROR: surface_flags line not found"); sys.exit(1)
-          print("OK: surface_flags line found at index %d" % flags_idx)
-
-          # ---- 3) Späte Deklarationen sammeln und entfernen ----
-          late_decls = []
-          late_idxs = []
-          for i in range(flags_idx + 1, len(lines)):
-              stripped = lines[i].strip()
-              if not stripped:
-                  continue
-              # EGLContext egl_context;
-              if "EGLContext egl_context" in stripped and stripped.endswith(";"):
-                  late_decls.append(lines[i])
-                  late_idxs.append(i)
-                  print("OK: found late decl 'EGLContext egl_context' at index %d" % i)
-              # bool result = false;  /  bool result;
-              elif "bool result" in stripped and stripped.endswith(";"):
-                  late_decls.append(lines[i])
-                  late_idxs.append(i)
-                  print("OK: found late decl 'bool result' at index %d" % i)
-
-          # Entferne die späten Deklarationen (von hinten nach vorne, um Indizes nicht zu verschieben)
-          for i in sorted(late_idxs, reverse=True):
-              del lines[i]
-
-          # ---- 4) flags_idx nach dem Löschen neu berechnen ----
-          flags_idx = None
-          for i, line in enumerate(lines):
-              if 'uint32_t surface_flags' in line:
-                  flags_idx = i
-                  break
-          if flags_idx is None:
-              print("ERROR: surface_flags not found after removing late decls"); sys.exit(1)
-
-          # ---- 5) Einfügeblock zusammenbauen: late_decls + Auto-Detect ----
-          insert_lines = []
-          for decl in late_decls:
-              insert_lines.append(decl)
-          if late_decls:
-              insert_lines.append("")
-
-          insert_lines.append(indent + "/* NZP_GBM_FORMAT_AUTODETECT */")
-          insert_lines.append(indent + "{")
-          insert_lines.append(indent + "    static const uint32_t nzp_gbm_formats[] = {")
-          insert_lines.append(indent + "        GBM_FORMAT_XRGB8888, GBM_FORMAT_ARGB8888,")
-          insert_lines.append(indent + "        GBM_FORMAT_RGB565,   GBM_FORMAT_BGR565,")
-          insert_lines.append(indent + "        GBM_FORMAT_XBGR8888, GBM_FORMAT_ABGR8888,")
-          insert_lines.append(indent + "        GBM_FORMAT_RGBX8888, GBM_FORMAT_RGBA8888,")
-          insert_lines.append(indent + "        GBM_FORMAT_BGRX8888, GBM_FORMAT_BGRA8888")
-          insert_lines.append(indent + "    };")
-          insert_lines.append(indent + "    int nzp_i;")
-          insert_lines.append(indent + "    surface_fmt = GBM_FORMAT_ARGB8888; /* fallback */")
-          insert_lines.append(indent + "    for (nzp_i = 0; nzp_i < (int)(sizeof(nzp_gbm_formats)/sizeof(nzp_gbm_formats[0])); nzp_i++) {")
-          insert_lines.append(indent + "        if (KMSDRM_gbm_device_is_format_supported(viddata->gbm_dev,")
-          insert_lines.append(indent + "                                                  nzp_gbm_formats[nzp_i], surface_flags)) {")
-          insert_lines.append(indent + "            surface_fmt = nzp_gbm_formats[nzp_i];")
-          insert_lines.append(indent + "            SDL_Log(\"NZP: using GBM format 0x%08x\", surface_fmt);")
-          insert_lines.append(indent + "            break;")
-          insert_lines.append(indent + "        }")
-          insert_lines.append(indent + "    }")
-          insert_lines.append(indent + "}")
-
-          # ---- 6) Nach surface_flags einfügen ----
-          lines = lines[:flags_idx + 1] + insert_lines + lines[flags_idx + 1:]
-
-          text = '\n'.join(lines)
-
-          # ---- 7) Alten "Trying anyway"-Warnblock entfernen ----
-          import re
-          warn_pattern = re.compile(
-              r"[ \t]*if\s*\(!KMSDRM_gbm_device_is_format_supported\s*\([^)]*\)\s*\)\s*\{\s*\n"
-              r"[ \t]*SDL_LogWarn\s*\(\s*SDL_LOG_CATEGORY_VIDEO\s*,\s*\n?"
-              r"[ \t]*\"GBM surface format not supported\. Trying anyway\.\"\s*\)\s*;\s*\n"
-              r"[ \t]*\}\s*\n",
-          )
-          new_text = warn_pattern.sub("", text, count=1)
-          if new_text != text:
-              text = new_text
-              print("OK: removed old 'Trying anyway' warning")
-
-          # ---- 8) KMSDRM_CreateWindow: echten Fehler loggen ----
-          caller_pattern = re.compile(
-              r"if\s*\(\s*!KMSDRM_CreateSurfaces\s*\(\s*_this\s*,\s*window\s*\)\s*\)\s*\{\s*\n"
-              r"([ \t]*)return\s+SDL_SetError\s*\(\s*\"Can't window GBM/EGL surfaces on window creation\.\"\s*\)\s*;\s*\n"
-              r"[ \t]*\}",
-          )
-          def caller_repl(m):
-              ind = m.group(1)
-              return ("if (!KMSDRM_CreateSurfaces(_this, window)) {\n"
-                      + ind + "SDL_LogError(SDL_LOG_CATEGORY_VIDEO, \"NZP: KMSDRM_CreateSurfaces failed: %s\", SDL_GetError());\n"
-                      + ind + "return SDL_SetError(\"Can't window GBM/EGL surfaces on window creation.\");\n"
-                      + "    }")
-          new_text, n = caller_pattern.subn(caller_repl, text, count=1)
-          if n > 0:
-              text = new_text
+          # 2) Logging bei CreateSurfaces-Fehler
+          old_caller = "if (!KMSDRM_CreateSurfaces(_this, window)) {\n        return SDL_SetError(\"Can't window GBM/EGL surfaces on window creation.\");\n    }"
+          new_caller = "if (!KMSDRM_CreateSurfaces(_this, window)) {\n        SDL_LogError(SDL_LOG_CATEGORY_VIDEO, \"NZP: KMSDRM_CreateSurfaces failed: %s\", SDL_GetError());\n        return SDL_SetError(\"Can't window GBM/EGL surfaces on window creation.\");\n    }"
+          if old_caller in text:
+              text = text.replace(old_caller, new_caller, 1)
               print("OK: KMSDRM_CreateWindow logs real error")
+          elif "NZP: KMSDRM_CreateSurfaces failed" in text:
+              print("already logs error")
+          else:
+              print("WARN: KMSDRM_CreateSurfaces caller not found")
 
           path.write_text(text)
-
-          # ---- 9) Verifikation: Bereich um surface_fmt herum ausgeben ----
-          print("=== Verify: 30 Zeilen ab surface_fmt ===")
-          verify_lines = text.split('\n')
-          start = None
-          for i, line in enumerate(verify_lines):
-              if 'uint32_t surface_fmt;' in line:
-                  start = i
-                  break
-          if start is not None:
-              for line in verify_lines[max(0, start-3):start + 30]:
-                  print("   ", line)
           PYEOF
 
-          cat > "$RUNNER_TEMP/nzp-build/patch_sdl_misc.py" << 'PYEOF'
-          import sys, pathlib, re
-          path = pathlib.Path(sys.argv[1] + "/src/video/kmsdrm/SDL_kmsdrmvideo.c")
-          t = path.read_text()
-          if "NZP-M9-KMSDRM-WINDOW-FLAG" not in t:
-              m = re.search(r"(window->driverdata\s*=\s*windata\s*;)", t, re.DOTALL)
-              if m:
-                  ins = ("    /* NZP-M9-KMSDRM-WINDOW-FLAG */\n"
-                         "    if (!(window->flags & SDL_WINDOW_VULKAN)) {\n"
-                         "        window->flags |= SDL_WINDOW_OPENGL;\n"
-                         "    }\n\n")
-                  t = t[:m.start()] + ins + t[m.start():]
-                  path.write_text(t); print("OK: Window-Flag Patch")
-          t = path.read_text()
-          if "NZP-M9-PAGEFLIP-FALLBACK" not in t:
-              m = re.search(r"(KMSDRM_drmModePageFlip\s*\([^;]+;)", t, re.DOTALL)
-              if m:
-                  fb = ("\n    /* NZP-M9-PAGEFLIP-FALLBACK */\n"
-                        "    if (ret != 0 && (flip_flags & DRM_MODE_PAGE_FLIP_ASYNC)) {\n"
-                        "        viddata->async_pageflip_support = SDL_FALSE;\n"
-                        "        flip_flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;\n"
-                        "        ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id, fb_info->fb_id, flip_flags, &windata->waiting_for_flip);\n"
-                        "    }\n")
-                  t = t[:m.end()] + fb + t[m.end():]
-                  path.write_text(t); print("OK: Pageflip-Fallback")
+          cat > "$RUNNER_TEMP/nzp-build/patch_makefile_werror.py" << 'PYEOF'
+          import sys, pathlib
+          for name in sys.argv[1:]:
+              p = pathlib.Path(name)
+              if not p.exists():
+                  print("WARN: %s not found" % name); continue
+              t = p.read_text()
+              orig = t
+              t = t.replace("-Werror=declaration-after-statement", "")
+              t = t.replace("-Wdeclaration-after-statement", "")
+              if t != orig:
+                  p.write_text(t)
+                  print("OK: stripped C90 flags from %s" % name)
+              else:
+                  print("NOTE: nothing to strip in %s" % name)
           PYEOF
 
           cat > "$RUNNER_TEMP/nzp-build/build.sh" << 'BUILDEOF'
@@ -278,20 +155,22 @@ jobs:
           tar xf "SDL2-${SDL2_VER}.tar.gz"
           cd "SDL2-${SDL2_VER}"
 
-          echo "=== SDL KMSDRM Patch ==="
-          python3 /tmp/patch_sdl_kmsdrm.py .
-
-          echo "=== SDL misc patches ==="
-          python3 /tmp/patch_sdl_misc.py .
-
-          echo "=== Verify patched source (grep) ==="
-          grep -n "NZP_GBM_FORMAT_AUTODETECT\|NZP: KMSDRM_CreateSurfaces failed\|EGLContext egl_context" src/video/kmsdrm/SDL_kmsdrmvideo.c | head -8 || true
+          echo "=== SDL source patch (format + logging) ==="
+          python3 /tmp/patch_sdl_simple.py .
+          grep -n "GBM_FORMAT_XRGB8888\|NZP: KMSDRM_CreateSurfaces failed" src/video/kmsdrm/SDL_kmsdrmvideo.c | head -3 || true
 
           CFLAGS="-fPIC -Wno-declaration-after-statement" \
           LDFLAGS="-L/usr/lib/aarch64-linux-gnu" \
           ./configure --prefix=/usr/local --host=aarch64-linux-gnu \
             --enable-video-kmsdrm --disable-video-x11 --disable-video-wayland \
             --disable-video-vulkan --enable-video-opengles --enable-shared --disable-static
+
+          echo "=== Strip C90 Werror from Makefile ==="
+          python3 /tmp/patch_makefile_werror.py Makefile
+          echo "--- Verify Makefile ---"
+          grep -c "Werror=declaration-after-statement" Makefile || echo "0 (good)"
+          grep -c "Wdeclaration-after-statement" Makefile || echo "0 (good)"
+
           make -j"$(nproc)"
           make install
 
@@ -304,7 +183,7 @@ jobs:
           done
 
           echo "=== Verify binary markers ==="
-          strings /usr/local/lib/libSDL2-2.0.so.0 | grep -E "NZP: using GBM format|NZP: KMSDRM_CreateSurfaces failed" | head -3 || \
+          strings /usr/local/lib/libSDL2-2.0.so.0 | grep -E "NZP: KMSDRM_CreateSurfaces failed" | head -2 || \
             { echo "FATAL: Marker nicht im Binary"; exit 1; }
 
           echo "=== SDL2 md5 ==="
@@ -383,8 +262,8 @@ jobs:
             -v "$RUNNER_TEMP/nzp-build/patch_prcmds.py:/tmp/patch_prcmds.py:ro" \
             -v "$RUNNER_TEMP/nzp-build/patch_makefile.py:/tmp/patch_makefile.py:ro" \
             -v "$RUNNER_TEMP/nzp-build/patch_glvidegl.py:/tmp/patch_glvidegl.py:ro" \
-            -v "$RUNNER_TEMP/nzp-build/patch_sdl_kmsdrm.py:/tmp/patch_sdl_kmsdrm.py:ro" \
-            -v "$RUNNER_TEMP/nzp-build/patch_sdl_misc.py:/tmp/patch_sdl_misc.py:ro" \
+            -v "$RUNNER_TEMP/nzp-build/patch_sdl_simple.py:/tmp/patch_sdl_simple.py:ro" \
+            -v "$RUNNER_TEMP/nzp-build/patch_makefile_werror.py:/tmp/patch_makefile_werror.py:ro" \
             -v "$RUNNER_TEMP/nzp-build/build.sh:/tmp/build.sh:ro" \
             -w /workspace \
             ubuntu:20.04 bash /tmp/build.sh
