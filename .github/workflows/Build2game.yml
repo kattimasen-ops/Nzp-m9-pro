@@ -26,6 +26,9 @@ jobs:
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/nzp-build"
 
+          # ------------------------------------------------------------------
+          # 1) NZ:P-spezifischer Patch: CRC-Check in pr_cmds.c deaktivieren
+          # ------------------------------------------------------------------
           cat > "$RUNNER_TEMP/nzp-build/patch_prcmds.py" << 'PYEOF'
           import sys, pathlib
           p = pathlib.Path(sys.argv[1]); text = p.read_text()
@@ -40,6 +43,9 @@ jobs:
           p.write_text(text); print("pr_cmds.c patched")
           PYEOF
 
+          # ------------------------------------------------------------------
+          # 2) FTEQW Makefile: SDL/EGL-Objekte und CFLAGS anpassen
+          # ------------------------------------------------------------------
           cat > "$RUNNER_TEMP/nzp-build/patch_makefile.py" << 'PYEOF'
           import sys, pathlib
           p = pathlib.Path(sys.argv[1])
@@ -62,6 +68,9 @@ jobs:
           p.write_text("\n".join(lines) + "\n"); print("Makefile patched")
           PYEOF
 
+          # ------------------------------------------------------------------
+          # 3) FTEQW gl_videgl.c: Weak-Stub für eglrendererinfo (falls nötig)
+          # ------------------------------------------------------------------
           cat > "$RUNNER_TEMP/nzp-build/patch_glvidegl.py" << 'PYEOF'
           import sys, pathlib, re
           p = pathlib.Path(sys.argv[1]); text = p.read_text()
@@ -73,12 +82,16 @@ jobs:
               print("eglrendererinfo already defined")
           PYEOF
 
+          # ------------------------------------------------------------------
+          # 4) SDL KMSDRM Patches: CreateWindow, Format-Autodetect, Async-Fallback
+          # ------------------------------------------------------------------
           cat > "$RUNNER_TEMP/nzp-build/patch_sdl_kmsdrm.py" << 'PYEOF'
           import sys, pathlib, re
-          vid = pathlib.Path(sys.argv[1] + "/src/video/kmsdrm/SDL_kmsdrmvideo.c")
-          text = vid.read_text()
+          root = pathlib.Path(sys.argv[1])
 
-          # 1) Invertierte Prüfung in KMSDRM_CreateWindow (zeilenbasiert)
+          # --- 4a) SDL_kmsdrmvideo.c: KMSDRM_CreateWindow-Prüfung invertieren ---
+          vid = root / "src/video/kmsdrm/SDL_kmsdrmvideo.c"
+          text = vid.read_text()
           lines = text.splitlines()
           fixed = False
           for i, line in enumerate(lines):
@@ -87,15 +100,14 @@ jobs:
                       if 'if (ret == 0)' in lines[j]:
                           lines[j] = lines[j].replace('if (ret == 0)', 'if (ret != 0)')
                           fixed = True
-                          print(f"OK: invertierte Prüfung in Zeile {j+1} korrigiert")
+                          print(f"OK: KMSDRM_CreateWindow invertierte Prüfung (Zeile {j+1}) korrigiert")
                           break
-                  if fixed:
-                      break
+                  if fixed: break
           if not fixed:
               print("WARN: invertierte Prüfung nicht gefunden (evtl. bereits korrekt)")
           text = '\n'.join(lines)
 
-          # 2) Format-Autodetect: ARGB8888 durch Liste ersetzen (Commit 6fd2c83)
+          # --- 4b) Format-Autodetect (falls noch nicht in SDL 2.30.10) ---
           old_fmt = "uint32_t surface_fmt = GBM_FORMAT_ARGB8888;"
           if old_fmt in text:
               new_lines = [
@@ -127,31 +139,53 @@ jobs:
               print("OK: Format-Autodetect eingefügt")
           elif "NZP: format autodetect" in text:
               print("already format-autodetect")
-
-          # 3) libmali gbm_device_get_fd() Workaround
-          if "NZP_LIBMALI_FD_FIX" not in text:
-              pat = re.compile(r"(dispdata->gbm\s*=\s*KMSDRM_gbm_create_device\s*\([^;]+\);)")
-              m = pat.search(text)
-              if m:
-                  repl = (m.group(1) + "\n"
-                          "    /* NZP_LIBMALI_FD_FIX */\n"
-                          "    if (dispdata->gbm) {\n"
-                          "        dispdata->drm_fd = KMSDRM_gbm_device_get_fd(dispdata->gbm);\n"
-                          "    }")
-                  text = text[:m.start()] + repl + text[m.end():]
-                  print("OK: libmali gbm_device_get_fd() workaround")
-
           vid.write_text(text)
+
+          # --- 4c) SDL_kmsdrmopengles.c: Async-Pageflip-Fallback (Issue #16174) ---
+          gles = root / "src/video/kmsdrm/SDL_kmsdrmopengles.c"
+          gtext = gles.read_text()
+          if "NZP_ASYNC_PAGEFLIP_FALLBACK" in gtext:
+              print("already async-pageflip-fallback")
+          else:
+              # Suche nach dem KMSDRM_drmModePageFlip-Aufruf in KMSDRM_GLES_SwapWindow
+              # Der genaue Codeblock kann je nach SDL-Version leicht variieren.
+              # Wir suchen nach dem Muster und fügen den Fallback ein.
+              pattern = re.compile(
+                  r"(ret = KMSDRM_drmModePageFlip\(viddata->drm_fd,\s*"
+                  r"dispdata->crtc->crtc_id,\s*"
+                  r"fb_info->fb_id,\s*"
+                  r"flip_flags,\s*"
+                  r"&windata->waiting_for_flip\);)(\s*\n\s*if \(ret == 0\) \{\s*\n\s*windata->waiting_for_flip = SDL_TRUE;\s*\n\s*\} else \{\s*\n\s*SDL_LogError\(SDL_LOG_CATEGORY_VIDEO, \"Could not queue pageflip: %d\", ret\);\s*\n\s*\})"
+              )
+              m = pattern.search(gtext)
+              if m:
+                  replacement = m.group(1) + """
+    /* NZP_ASYNC_PAGEFLIP_FALLBACK: Manche Treiber (z.B. Mali auf RK3326) werben mit ASYNC, lehnen es aber ab. */
+    if (ret && (flip_flags & DRM_MODE_PAGE_FLIP_ASYNC)) {
+        viddata->async_pageflip_support = SDL_FALSE;
+        flip_flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;
+        ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id, fb_info->fb_id, flip_flags, &windata->waiting_for_flip);
+        if (ret == 0) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO, "NZP: Async pageflip rejected, using synchronous flips.");
+        }
+    }
+""" + m.group(2)
+                  gtext = gtext[:m.start()] + replacement + gtext[m.end():]
+                  gles.write_text(gtext)
+                  print("OK: Async-Pageflip-Fallback eingefügt")
+              else:
+                  print("WARN: Async-Pageflip-Codeblock nicht gefunden. Prüfe SDL-Version.")
           PYEOF
 
+          # ------------------------------------------------------------------
+          # 5) Fallback für KMSDRM_GetSym (falls d501f6d nicht anwendbar)
+          # ------------------------------------------------------------------
           cat > "$RUNNER_TEMP/nzp-build/patch_getsym_fallback.py" << 'PYEOF'
-          # Fallback, falls der offizielle d501f6d-Patch nicht angewendet werden kann
           import pathlib, re
           vid = pathlib.Path("src/video/kmsdrm/SDL_kmsdrmvideo.c")
           text = vid.read_text()
           if "KMSDRM_GetSym(const char *fnname, int *pHasModule, bool required)" in text:
               print("GetSym already has required param"); raise SystemExit(0)
-
           old_sig = "static void *KMSDRM_GetSym(const char *fnname, int *pHasModule)"
           new_sig = "static void *KMSDRM_GetSym(const char *fnname, int *pHasModule, bool required)"
           if old_sig in text:
@@ -159,7 +193,6 @@ jobs:
               print("OK: KMSDRM_GetSym -> required param")
           else:
               print("WARN: KMSDRM_GetSym signature not found")
-
           old_kill = "if (!fn) {\n        *pHasModule = 0; // kill this module."
           new_kill = "if (!fn && required) {\n        *pHasModule = 0; // kill this module."
           if old_kill in text:
@@ -167,30 +200,20 @@ jobs:
               print("OK: missing symbols no longer kill module unless required")
           else:
               print("WARN: kill-module block not found")
-
-          # Optionale Symbole in SDL_kmsdrmsym.h markieren
           sym_h = pathlib.Path("src/video/kmsdrm/SDL_kmsdrmsym.h")
           if sym_h.exists():
               st = sym_h.read_text()
-              optional = [
-                  "drmModeAddFB2WithModifiers",
-                  "gbm_bo_get_modifier",
-                  "gbm_bo_get_plane_count",
-                  "gbm_bo_get_offset",
-                  "gbm_bo_get_stride_for_plane",
-              ]
+              optional = ["drmModeAddFB2WithModifiers", "gbm_bo_get_modifier", "gbm_bo_get_plane_count", "gbm_bo_get_offset", "gbm_bo_get_stride_for_plane"]
               for fn in optional:
-                  st = re.sub(
-                      r"(SDL_KMSDRM_SYM\([^,]+,\s*" + re.escape(fn) + r")",
-                      r"SDL_KMSDRM_SYM_OPT\1",
-                      st,
-                  )
+                  st = re.sub(r"(SDL_KMSDRM_SYM\([^,]+,\s*" + re.escape(fn) + r")", r"SDL_KMSDRM_SYM_OPT\1", st)
               sym_h.write_text(st)
               print("OK: optional symbols marked in SDL_kmsdrmsym.h")
-
           vid.write_text(text)
           PYEOF
 
+          # ------------------------------------------------------------------
+          # 6) Build-Skript für Docker (ubuntu:20.04)
+          # ------------------------------------------------------------------
           cat > "$RUNNER_TEMP/nzp-build/build.sh" << 'BUILDEOF'
           #!/usr/bin/env bash
           set -euo pipefail
@@ -220,7 +243,10 @@ jobs:
           export PKG_CONFIG_LIBDIR=/usr/local/lib/pkgconfig:/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
           export PKG_CONFIG_SYSROOT_DIR=/
 
-          SDL2_VER="2.30.11"
+          # --------------------------------------------------------------
+          # SDL 2.30.10 (Version der funktionierenden alten Binary)
+          # --------------------------------------------------------------
+          SDL2_VER="2.30.10"
           cd /tmp
           wget -q "https://github.com/libsdl-org/SDL/releases/download/release-${SDL2_VER}/SDL2-${SDL2_VER}.tar.gz"
           tar xf "SDL2-${SDL2_VER}.tar.gz"
@@ -236,7 +262,7 @@ jobs:
             python3 /tmp/patch_getsym_fallback.py
           fi
 
-          echo "=== SDL KMSDRM + Mali Patches ==="
+          echo "=== SDL KMSDRM + Async-Pageflip-Patches ==="
           python3 /tmp/patch_sdl_kmsdrm.py .
 
           CFLAGS="-fPIC -Wno-declaration-after-statement -Wno-error=declaration-after-statement" \
@@ -259,14 +285,13 @@ jobs:
           echo "=== SDL2 checks ==="
           aarch64-linux-gnu-nm -D /usr/local/lib/libSDL2-2.0.so.0 | grep -q "KMSDRM_CreateSurfaces" && \
             echo "OK: KMSDRM_CreateSurfaces exported"
-          md5sum /usr/local/lib/libSDL2-2.0.so.0.3000.11
+          md5sum /usr/local/lib/libSDL2-2.0.so.0.3000.10
 
           cd /workspace/engine
 
           echo "=== zlib-1.3.1 von GitHub laden ==="
           rm -f zlib-1.3.1.tar.gz
-          wget -q -O zlib-1.3.1.tar.gz \
-            "https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz"
+          wget -q -O zlib-1.3.1.tar.gz "https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz"
           gzip -t zlib-1.3.1.tar.gz || { echo "FATAL: zlib kein gzip"; exit 1; }
 
           echo "=== Patch pr_cmds.c ==="
@@ -324,7 +349,7 @@ jobs:
 
           echo "=== FINAL ==="
           ls -la libSDL2-2.0.so* nzportablearm64*
-          md5sum libSDL2-2.0.so.0.3000.11 nzportablearm64
+          md5sum libSDL2-2.0.so.0.3000.10 nzportablearm64
           BUILDEOF
 
       - name: Cross-Compile in ubuntu:20.04
