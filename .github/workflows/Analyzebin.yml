@@ -1,0 +1,232 @@
+name: analyze-old-binary
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master, main]
+    paths:
+      - '_analysis/**'
+      - '.github/workflows/analyze-old-binary.yml'
+
+jobs:
+  analyze:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            binutils-aarch64-linux-gnu file patchelf
+
+      - name: Verify files present
+        run: |
+          echo "=== _analysis/ ==="
+          ls -la _analysis/ || true
+          echo
+          if [ ! -f _analysis/nzp-sdl.old ]; then
+            echo "FATAL: _analysis/nzp-sdl.old fehlt"
+            exit 1
+          fi
+          echo "OK: nzp-sdl.old vorhanden"
+
+      - name: Analyze binary
+        run: |
+          set -euo pipefail
+          BIN="_analysis/nzp-sdl.old"
+          OUT="$RUNNER_TEMP/report.txt"
+          : > "$OUT"
+
+          echo "============================================================" | tee -a "$OUT"
+          echo " NZP OLD BINARY ANALYSIS" | tee -a "$OUT"
+          echo "============================================================" | tee -a "$OUT"
+
+          echo | tee -a "$OUT"
+          echo "=== file ===" | tee -a "$OUT"
+          file "$BIN" | tee -a "$OUT"
+
+          echo | tee -a "$OUT"
+          echo "=== sha256 ===" | tee -a "$OUT"
+          sha256sum "$BIN" | tee -a "$OUT"
+
+          echo | tee -a "$OUT"
+          echo "=== size ===" | tee -a "$OUT"
+          ls -la "$BIN" | tee -a "$OUT"
+
+          echo | tee -a "$OUT"
+          echo "=== ELF header (Architektur, Type) ===" | tee -a "$OUT"
+          readelf -h "$BIN" | tee -a "$OUT" || true
+
+          echo | tee -a "$OUT"
+          echo "=== NEEDED libs (DT_NEEDED) ===" | tee -a "$OUT"
+          readelf -d "$BIN" 2>/dev/null | grep -E "NEEDED|RPATH|RUNPATH|SONAME" | tee -a "$OUT" || true
+
+          echo | tee -a "$OUT"
+          echo "=== Sections (.comment / .note) ===" | tee -a "$OUT"
+          readelf -S "$BIN" 2>/dev/null | grep -E "comment|note|debug" | tee -a "$OUT" || true
+
+          echo | tee -a "$OUT"
+          echo "=== .comment Section (Compiler-Version) ===" | tee -a "$OUT"
+          readelf -p .comment "$BIN" 2>/dev/null | tee -a "$OUT" || true
+
+          echo | tee -a "$OUT"
+          echo "=== SDL-Version strings ===" | tee -a "$OUT"
+          strings "$BIN" | grep -iE "SDL_MAJOR_VERSION|SDL_MINOR_VERSION|SDL_PATCHLEVEL|2\.30\.[0-9]|2\.28\.[0-9]|2\.26\.[0-9]|2\.0\.[0-9]+|SDL [0-9]\.[0-9]" | sort -u | head -20 | tee -a "$OUT" || true
+
+          echo | tee -a "$OUT"
+          echo "=== SDL video driver strings ===" | tee -a "$OUT"
+          strings "$BIN" | grep -iE "kmsdrm|fbdev|wayland|x11|offscreen|dummy|opengl|opengles|eglrenderer|SDL video driver" | sort -u | head -30 | tee -a "$OUT" || true
+
+          echo | tee -a "$OUT"
+          echo "=== Build/Versions-Strings (FTE) ===" | tee -a "$OUT"
+          strings "$BIN" | grep -iE "FTE|NZ:P|nzportable|git-|SVNREVISION|SVN_VERSION|Engine Version|fteqw" | sort -u | head -30 | tee -a "$OUT" || true
+
+          echo | tee -a "$OUT"
+          echo "=== Imported SDL_* symbols ===" | tee -a "$OUT"
+          aarch64-linux-gnu-nm -D --undefined-only "$BIN" 2>/dev/null | awk '{print $2}' | grep -E "^SDL_" | sort -u | tee -a "$OUT" || true
+
+          echo | tee -a "$OUT"
+          echo "=== Imported egl/gbm/drm symbols ===" | tee -a "$OUT"
+          aarch64-linux-gnu-nm -D --undefined-only "$BIN" 2>/dev/null | awk '{print $2}' | grep -E "^(egl|gbm|drm)" | sort -u | tee -a "$OUT" || true
+
+          echo | tee -a "$OUT"
+          echo "=== Imported INS_/IN_ symbols (Input) ===" | tee -a "$OUT"
+          aarch64-linux-gnu-nm -D --undefined-only "$BIN" 2>/dev/null | awk '{print $2}' | grep -E "^(INS_|IN_)" | sort -u | tee -a "$OUT" || true
+
+          echo | tee -a "$OUT"
+          echo "=== Imported GLVID_ symbols ===" | tee -a "$OUT"
+          aarch64-linux-gnu-nm -D --undefined-only "$BIN" 2>/dev/null | awk '{print $2}' | grep -E "^GLVID_" | sort -u | tee -a "$OUT" || true
+
+          echo | tee -a "$OUT"
+          echo "=== Imported Sys_ symbols ===" | tee -a "$OUT"
+          aarch64-linux-gnu-nm -D --undefined-only "$BIN" 2>/dev/null | awk '{print $2}' | grep -E "^Sys_" | sort -u | head -20 | tee -a "$OUT" || true
+
+          echo | tee -a "$OUT"
+          echo "=== Exported (own) symbols containing 'INS_' oder 'GLVID_' ===" | tee -a "$OUT"
+          aarch64-linux-gnu-nm -D --defined-only "$BIN" 2>/dev/null | grep -E "(INS_|GLVID_)" | sort -u | head -30 | tee -a "$OUT" || true
+
+          echo | tee -a "$OUT"
+          echo "=== glibc version requirements ===" | tee -a "$OUT"
+          strings "$BIN" | grep -E "^GLIBC_[0-9]" | sort -V -u | tee -a "$OUT" || true
+
+          echo | tee -a "$OUT"
+          echo "=== Dynamischer Interpreter ===" | tee -a "$OUT"
+          readelf -l "$BIN" 2>/dev/null | grep -A1 "interpreter" | tee -a "$OUT" || true
+
+          echo | tee -a "$OUT"
+          echo "=== KMSDRM/EGL im eigenen Code? (defined) ===" | tee -a "$OUT"
+          aarch64-linux-gnu-nm -D --defined-only "$BIN" 2>/dev/null | grep -iE "kmsdrm|egl|gbm|gl" | head -30 | tee -a "$OUT" || true
+
+          echo | tee -a "$OUT"
+          echo "=== Symbol-Anzahl ===" | tee -a "$OUT"
+          echo "Defined dynamic:   $(aarch64-linux-gnu-nm -D --defined-only "$BIN" 2>/dev/null | wc -l)" | tee -a "$OUT"
+          echo "Undefined dynamic: $(aarch64-linux-gnu-nm -D --undefined-only "$BIN" 2>/dev/null | wc -l)" | tee -a "$OUT"
+
+          echo | tee -a "$OUT"
+          echo "============================================================" | tee -a "$OUT"
+          echo " ENDE BINARY ANALYSIS" | tee -a "$OUT"
+          echo "============================================================" | tee -a "$OUT"
+
+          # Kopie ins Workspace
+          cp "$OUT" _analysis/report-binary.txt
+
+      - name: Analyze old SDL2 (falls vorhanden)
+        run: |
+          set -euo pipefail
+          LIB="_analysis/libSDL2-2.0.so.0.old"
+          OUT="$RUNNER_TEMP/report-sdl2.txt"
+          : > "$OUT"
+
+          if [ ! -f "$LIB" ]; then
+            echo "SKIP: $LIB nicht vorhanden" | tee -a "$OUT"
+            cp "$OUT" _analysis/report-sdl2.txt
+            exit 0
+          fi
+
+          echo "============================================================" | tee -a "$OUT"
+          echo " OLD SDL2 ANALYSIS" | tee -a "$OUT"
+          echo "============================================================" | tee -a "$OUT"
+
+          echo | tee -a "$OUT"
+          echo "=== file ===" | tee -a "$OUT"
+          file "$LIB" | tee -a "$OUT"
+
+          echo | tee -a "$OUT"
+          echo "=== sha256 ===" | tee -a "$OUT"
+          sha256sum "$LIB" | tee -a "$OUT"
+
+          echo | tee -a "$OUT"
+          echo "=== size ===" | tee -a "$OUT"
+          ls -la "$LIB" | tee -a "$OUT"
+
+          echo | tee -a "$OUT"
+          echo "=== SONAME / NEEDED ===" | tee -a "$OUT"
+          readelf -d "$LIB" 2>/dev/null | grep -E "SONAME|NEEDED|RPATH|RUNPATH" | tee -a "$OUT" || true
+
+          echo | tee -a "$OUT"
+          echo "=== SDL-Version strings ===" | tee -a "$OUT"
+          strings "$LIB" | grep -iE "2\.30\.[0-9]|2\.28\.[0-9]|2\.26\.[0-9]|SDL [0-9]\.[0-9]|SDL_VERSION" | sort -u | head -20 | tee -a "$OUT" || true
+
+          echo | tee -a "$OUT"
+          echo "=== Video-Driver-Namen in SDL2 ===" | tee -a "$OUT"
+          strings "$LIB" | grep -iE "^kmsdrm$|^fbdev$|^wayland$|^x11$|^offscreen$|^dummy$|^opengl$|^opengles" | sort -u | tee -a "$OUT" || true
+
+          echo | tee -a "$OUT"
+          echo "=== Patch-Marker (NZP-M9) ===" | tee -a "$OUT"
+          strings "$LIB" | grep -E "NZP-M9|NZP-MALI|NZP_KMSDRM|NZP: using GBM format|NZP: KMSDRM_CreateSurfaces failed" | sort -u | tee -a "$OUT" || true
+
+          echo | tee -a "$OUT"
+          echo "=== KMSDRM-Symbole (exportiert) ===" | tee -a "$OUT"
+          aarch64-linux-gnu-nm -D --defined-only "$LIB" 2>/dev/null | grep -iE "KMSDRM|SDL_KMSDRM" | head -40 | tee -a "$OUT" || true
+
+          echo | tee -a "$OUT"
+          echo "=== glibc-Anforderungen ===" | tee -a "$OUT"
+          strings "$LIB" | grep -E "^GLIBC_[0-9]" | sort -V -u | tee -a "$OUT" || true
+
+          echo | tee -a "$OUT"
+          echo "=== DT_NEEDED (Abhängigkeiten) ===" | tee -a "$OUT"
+          readelf -d "$LIB" 2>/dev/null | grep NEEDED | tee -a "$OUT" || true
+
+          echo | tee -a "$OUT"
+          echo "=== KMSDRM-Funktionen vorhanden? (Defined check) ===" | tee -a "$OUT"
+          for fn in KMSDRM_CreateSurfaces KMSDRM_CreateWindow KMSDRM_GLES_SetupCrtc; do
+            if aarch64-linux-gnu-nm -D --defined-only "$LIB" 2>/dev/null | grep -q " $fn$"; then
+              echo "  $fn: DEFINED" | tee -a "$OUT"
+            else
+              echo "  $fn: fehlt" | tee -a "$OUT"
+            fi
+          done
+
+          cp "$OUT" _analysis/report-sdl2.txt
+
+      - name: Combine reports
+        run: |
+          set -euo pipefail
+          cat _analysis/report-binary.txt _analysis/report-sdl2.txt > _analysis/report-combined.txt 2>/dev/null || true
+          echo "=== Combined report size: $(wc -l < _analysis/report-combined.txt) Zeilen ==="
+          echo
+          echo "=== WICHTIGSTE ZEILEN ==="
+          echo
+          echo "--- NEEDED ---"
+          grep -A20 "NEEDED libs" _analysis/report-binary.txt | head -20 || true
+          echo
+          echo "--- SDL-Version (Binary) ---"
+          grep -A20 "SDL-Version strings" _analysis/report-binary.txt | head -10 || true
+          echo
+          echo "--- Video Driver ---"
+          grep -A20 "SDL video driver strings" _analysis/report-binary.txt | head -15 || true
+
+      - name: Upload report
+        uses: actions/upload-artifact@v4
+        with:
+          name: nzp-old-binary-analysis
+          path: |
+            _analysis/report-binary.txt
+            _analysis/report-sdl2.txt
+            _analysis/report-combined.txt
+          if-no-files-found: error
+          retention-days: 30
