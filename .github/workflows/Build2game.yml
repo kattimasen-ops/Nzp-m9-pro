@@ -107,7 +107,7 @@ jobs:
               print("WARN: invertierte Pruefung nicht gefunden (evtl. bereits korrekt)")
           text = '\n'.join(lines)
 
-          # --- 4b) Format-Autodetect (SDL 2.30.10 Layout: surface_flags kommt NACH surface_fmt) ---
+          # --- 4b) Format-Autodetect (SDL 2.30.10 Layout) ---
           if "NZP: format autodetect" in text:
               print("already format-autodetect")
           else:
@@ -157,7 +157,7 @@ jobs:
               else:
                   print("WARN: Format-Deklarationsblock nicht gefunden (evtl. bereits gepatcht)")
 
-          # --- 4c) Async page flip deaktivieren (RK3326 Mali Workaround) ---
+          # --- 4c) Async page flip deaktivieren ---
           if "NZP_ASYNC_DISABLED" not in text:
               replaced = 0
               for pat in [r"viddata->async_pageflip_support\s*=\s*support\s*;",
@@ -176,7 +176,7 @@ jobs:
 
           vid.write_text(text)
 
-          # --- 4d) SwapWindow-Runtime-Fallback (zweite Absicherung) ---
+          # --- 4d) SwapWindow-Runtime-Fallback ---
           gles = root / "src/video/kmsdrm/SDL_kmsdrmopengles.c"
           gtext = gles.read_text()
           if "NZP_ASYNC_SWAP_FALLBACK" not in gtext:
@@ -202,7 +202,7 @@ jobs:
           PYEOF
 
           # ------------------------------------------------------------------
-          # 5) Fallback für KMSDRM_GetSym (falls d501f6d nicht anwendbar)
+          # 5) Fallback für KMSDRM_GetSym
           # ------------------------------------------------------------------
           cat > "$RUNNER_TEMP/nzp-build/patch_getsym_fallback.py" << 'PYEOF'
           import pathlib, re
@@ -267,9 +267,6 @@ jobs:
           export PKG_CONFIG_LIBDIR=/usr/local/lib/pkgconfig:/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
           export PKG_CONFIG_SYSROOT_DIR=/
 
-          # --------------------------------------------------------------
-          # SDL 2.30.10 (Version der funktionierenden alten Binary)
-          # --------------------------------------------------------------
           SDL2_VER="2.30.10"
           cd /tmp
           wget -q "https://github.com/libsdl-org/SDL/releases/download/release-${SDL2_VER}/SDL2-${SDL2_VER}.tar.gz"
@@ -390,13 +387,19 @@ jobs:
             ubuntu:20.04 bash /tmp/build.sh
 
       # ==========================================================================
-      # NEUER SCHRITT: Mali-Hook + Startscript für das Artifact vorbereiten
+      # NEU: Mali-Hook + Startscript für das Artifact vorbereiten
       # ==========================================================================
       - name: Prepare Mali Hook & Startscript for Artifact
         run: |
           set -euo pipefail
           RELEASE_DIR="$GITHUB_WORKSPACE/engine/release"
           MALI_HOOK_DIR="$RELEASE_DIR/mali-hook"
+
+          echo "=== Korrigiere Berechtigungen für $RELEASE_DIR ==="
+          # Der Docker-Schritt hat den Ordner als root erstellt.
+          # Der Runner-Benutzer (UID 1001) braucht Schreibzugriff.
+          sudo chown -R "$(id -u):$(id -g)" "$RELEASE_DIR"
+
           mkdir -p "$MALI_HOOK_DIR"
 
           echo "=== Lade Mali-Paket (Bifrost G31, GBM, arm64) ==="
@@ -409,7 +412,6 @@ jobs:
           dpkg-deb -x "/tmp/${MALI_DEB}" /tmp/mali-extract
 
           echo "=== Extrahiere Hook und Mali-Blob ==="
-          # Die Hook-Bibliothek liegt typischerweise unter usr/lib/aarch64-linux-gnu/
           HOOK_SRC=$(find /tmp/mali-extract -name 'libmali-hook.so*' -type f | head -1)
           BLOB_SRC=$(find /tmp/mali-extract -name 'libmali-bifrost-g31-g13p0-gbm.so' -type f | head -1)
 
@@ -425,14 +427,6 @@ jobs:
           echo "OK: libmali-hook.so und libmali-bifrost-g31-g13p0-gbm.so kopiert."
 
           echo "=== Kopiere Startscript ==="
-          # Das Startscript wird aus dem Repository in den Release-Ordner kopiert.
-          # Stelle sicher, dass die Datei "Nazi Zombies.sh" im Repo unter
-          # .github/workflows/ oder einem bekannten Pfad liegt.
-          # Annahme: Die Datei liegt im Repo-Root oder wird hier eingefügt.
-          # Falls sie nicht existiert, erstelle sie aus dem Inhalt dieses Workflows.
-          # (In der Praxis: Die Datei sollte im Repo vorhanden sein.)
-          # Platzhalter: Wir gehen davon aus, dass sie bereits im Repo liegt.
-          # Kopiere sie, falls vorhanden.
           if [ -f "$GITHUB_WORKSPACE/Nazi Zombies.sh" ]; then
             cp "$GITHUB_WORKSPACE/Nazi Zombies.sh" "$RELEASE_DIR/Nazi Zombies.sh"
             chmod +x "$RELEASE_DIR/Nazi Zombies.sh"
