@@ -69,7 +69,7 @@ jobs:
           PYEOF
 
           # ------------------------------------------------------------------
-          # 3) FTEQW gl_videgl.c: Weak-Stub für eglrendererinfo (falls nötig)
+          # 3) FTEQW gl_videgl.c: Weak-Stub für eglrendererinfo
           # ------------------------------------------------------------------
           cat > "$RUNNER_TEMP/nzp-build/patch_glvidegl.py" << 'PYEOF'
           import sys, pathlib, re
@@ -83,7 +83,7 @@ jobs:
           PYEOF
 
           # ------------------------------------------------------------------
-          # 4) SDL KMSDRM Patches: CreateWindow, Format-Autodetect, Async-Fallback
+          # 4) SDL KMSDRM Patches
           # ------------------------------------------------------------------
           cat > "$RUNNER_TEMP/nzp-build/patch_sdl_kmsdrm.py" << 'PYEOF'
           import sys, pathlib, re
@@ -100,14 +100,14 @@ jobs:
                       if 'if (ret == 0)' in lines[j]:
                           lines[j] = lines[j].replace('if (ret == 0)', 'if (ret != 0)')
                           fixed = True
-                          print(f"OK: KMSDRM_CreateWindow invertierte Prüfung (Zeile {j+1}) korrigiert")
+                          print("OK: KMSDRM_CreateWindow invertierte Pruefung (Zeile %d) korrigiert" % (j+1))
                           break
                   if fixed: break
           if not fixed:
-              print("WARN: invertierte Prüfung nicht gefunden (evtl. bereits korrekt)")
+              print("WARN: invertierte Pruefung nicht gefunden (evtl. bereits korrekt)")
           text = '\n'.join(lines)
 
-          # --- 4b) Format-Autodetect (falls noch nicht in SDL 2.30.10) ---
+          # --- 4b) Format-Autodetect (falls noch nicht vorhanden) ---
           old_fmt = "uint32_t surface_fmt = GBM_FORMAT_ARGB8888;"
           if old_fmt in text:
               new_lines = [
@@ -136,45 +136,55 @@ jobs:
                   "}",
               ]
               text = text.replace(old_fmt, "\n".join(new_lines), 1)
-              print("OK: Format-Autodetect eingefügt")
+              print("OK: Format-Autodetect eingefuegt")
           elif "NZP: format autodetect" in text:
               print("already format-autodetect")
+
+          # --- 4c) Async page flip deaktivieren (RK3326 Mali Workaround) ---
+          # Der Mali-G31-Treiber wirbt mit DRM_CAP_ASYNC_PAGE_FLIP, lehnt den
+          # tatsaechlichen asynchronen Flip aber mit -EINVAL ab -> schwarzer
+          # Bildschirm. Wir zwingen async_pageflip_support auf SDL_FALSE.
+          if "NZP_ASYNC_DISABLED" not in text:
+              replaced = 0
+              for pat in [r"viddata->async_pageflip_support\s*=\s*support\s*;",
+                          r"viddata->async_pageflip_support\s*=\s*SDL_TRUE\s*;",
+                          r"viddata->async_pageflip_support\s*=\s*true\s*;"]:
+                  new_text, n = re.subn(pat, "viddata->async_pageflip_support = SDL_FALSE; /* NZP_ASYNC_DISABLED */", text)
+                  if n > 0:
+                      text = new_text
+                      replaced += n
+              if replaced > 0:
+                  print("OK: async_pageflip_support force-disabled (%d Stellen)" % replaced)
+              else:
+                  print("WARN: async_pageflip_support assignment not found")
+          else:
+              print("already async-disabled")
+
           vid.write_text(text)
 
-          # --- 4c) SDL_kmsdrmopengles.c: Async-Pageflip-Fallback (Issue #16174) ---
+          # --- 4d) SwapWindow-Runtime-Fallback (zweite Absicherung) ---
           gles = root / "src/video/kmsdrm/SDL_kmsdrmopengles.c"
           gtext = gles.read_text()
-          if "NZP_ASYNC_PAGEFLIP_FALLBACK" in gtext:
-              print("already async-pageflip-fallback")
-          else:
-              # Suche nach dem KMSDRM_drmModePageFlip-Aufruf in KMSDRM_GLES_SwapWindow
-              # Der genaue Codeblock kann je nach SDL-Version leicht variieren.
-              # Wir suchen nach dem Muster und fügen den Fallback ein.
-              pattern = re.compile(
-                  r"(ret = KMSDRM_drmModePageFlip\(viddata->drm_fd,\s*"
-                  r"dispdata->crtc->crtc_id,\s*"
-                  r"fb_info->fb_id,\s*"
-                  r"flip_flags,\s*"
-                  r"&windata->waiting_for_flip\);)(\s*\n\s*if \(ret == 0\) \{\s*\n\s*windata->waiting_for_flip = SDL_TRUE;\s*\n\s*\} else \{\s*\n\s*SDL_LogError\(SDL_LOG_CATEGORY_VIDEO, \"Could not queue pageflip: %d\", ret\);\s*\n\s*\})"
-              )
-              m = pattern.search(gtext)
-              if m:
-                  replacement = m.group(1) + """
-    /* NZP_ASYNC_PAGEFLIP_FALLBACK: Manche Treiber (z.B. Mali auf RK3326) werben mit ASYNC, lehnen es aber ab. */
-    if (ret && (flip_flags & DRM_MODE_PAGE_FLIP_ASYNC)) {
-        viddata->async_pageflip_support = SDL_FALSE;
-        flip_flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;
-        ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id, fb_info->fb_id, flip_flags, &windata->waiting_for_flip);
-        if (ret == 0) {
-            SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO, "NZP: Async pageflip rejected, using synchronous flips.");
-        }
-    }
-""" + m.group(2)
-                  gtext = gtext[:m.start()] + replacement + gtext[m.end():]
+          if "NZP_ASYNC_SWAP_FALLBACK" not in gtext:
+              old_line = "    ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id, fb_info->fb_id, flip_flags, &windata->waiting_for_flip);"
+              if old_line in gtext:
+                  fallback_lines = [
+                      "    ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id, fb_info->fb_id, flip_flags, &windata->waiting_for_flip);",
+                      "    /* NZP_ASYNC_SWAP_FALLBACK */",
+                      "    if (ret && (flip_flags & DRM_MODE_PAGE_FLIP_ASYNC)) {",
+                      "        viddata->async_pageflip_support = SDL_FALSE;",
+                      "        flip_flags &= ~DRM_MODE_PAGE_FLIP_ASYNC;",
+                      "        ret = KMSDRM_drmModePageFlip(viddata->drm_fd, dispdata->crtc->crtc_id, fb_info->fb_id, flip_flags, &windata->waiting_for_flip);",
+                      "        if (ret == 0) { SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO, \"NZP: async flip rejected, using sync\"); }",
+                      "    }",
+                  ]
+                  gtext = gtext.replace(old_line, "\n".join(fallback_lines), 1)
                   gles.write_text(gtext)
-                  print("OK: Async-Pageflip-Fallback eingefügt")
+                  print("OK: SwapWindow async-fallback eingefuegt")
               else:
-                  print("WARN: Async-Pageflip-Codeblock nicht gefunden. Prüfe SDL-Version.")
+                  print("WARN: SwapWindow page-flip line not found (force-disable greift trotzdem)")
+          else:
+              print("already async-swap-fallback")
           PYEOF
 
           # ------------------------------------------------------------------
@@ -285,7 +295,7 @@ jobs:
           echo "=== SDL2 checks ==="
           aarch64-linux-gnu-nm -D /usr/local/lib/libSDL2-2.0.so.0 | grep -q "KMSDRM_CreateSurfaces" && \
             echo "OK: KMSDRM_CreateSurfaces exported"
-          md5sum /usr/local/lib/libSDL2-2.0.so.0.3000.10
+          md5sum /usr/local/lib/libSDL2-2.0.so.0.3000.10 || true
 
           cd /workspace/engine
 
@@ -349,7 +359,7 @@ jobs:
 
           echo "=== FINAL ==="
           ls -la libSDL2-2.0.so* nzportablearm64*
-          md5sum libSDL2-2.0.so.0.3000.10 nzportablearm64
+          md5sum libSDL2-2.0.so.0.3000.10 nzportablearm64 || true
           BUILDEOF
 
       - name: Cross-Compile in ubuntu:20.04
