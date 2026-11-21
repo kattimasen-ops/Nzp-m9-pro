@@ -73,13 +73,30 @@ jobs:
               print("eglrendererinfo already defined")
           PYEOF
 
-          cat > "$RUNNER_TEMP/nzp-build/patch_sdl_mali.py" << 'PYEOF'
-          import sys, pathlib, re
-
+          cat > "$RUNNER_TEMP/nzp-build/patch_sdl_kmsdrm.py" << 'PYEOF'
+          import sys, pathlib
           vid = pathlib.Path(sys.argv[1] + "/src/video/kmsdrm/SDL_kmsdrmvideo.c")
           text = vid.read_text()
 
-          # 1) GBM_FORMAT_XRGB8888 (Mali G31, Bug 3792)
+          # 1) Invertierte Prüfung in KMSDRM_CreateWindow korrigieren (zeilenbasiert)
+          lines = text.splitlines()
+          fixed = False
+          for i, line in enumerate(lines):
+              if 'ret = KMSDRM_CreateSurfaces(_this, window);' in line:
+                  # Suche die nächste Zeile mit 'if (ret == 0)'
+                  for j in range(i+1, min(i+6, len(lines))):
+                      if 'if (ret == 0)' in lines[j]:
+                          lines[j] = lines[j].replace('if (ret == 0)', 'if (ret != 0)')
+                          fixed = True
+                          print(f"OK: invertierte Prüfung in Zeile {j+1} korrigiert")
+                          break
+                  if fixed:
+                      break
+          if not fixed:
+              print("WARN: invertierte Prüfung nicht gefunden (evtl. bereits korrekt)")
+          text = '\n'.join(lines)
+
+          # 2) GBM-Format auf XRGB8888 (Mali G31, Bug 3792)
           old_fmt = "uint32_t surface_fmt = GBM_FORMAT_ARGB8888;"
           new_fmt = "uint32_t surface_fmt = GBM_FORMAT_XRGB8888; /* NZP: Mali G31 */"
           if old_fmt in text:
@@ -88,59 +105,21 @@ jobs:
           elif new_fmt in text:
               print("already XRGB8888")
 
-          # 2) libmali gbm_device_get_fd() Workaround
+          # 3) libmali gbm_device_get_fd() Workaround
           if "NZP_LIBMALI_FD_FIX" not in text:
+              import re
               pat = re.compile(r"(dispdata->gbm\s*=\s*KMSDRM_gbm_create_device\s*\([^;]+\);)")
               m = pat.search(text)
               if m:
                   repl = (m.group(1) + "\n"
-                          "    /* NZP_LIBMALI_FD_FIX: libmali duplicates fd on gbm_device_get_fd() */\n"
+                          "    /* NZP_LIBMALI_FD_FIX */\n"
                           "    if (dispdata->gbm) {\n"
                           "        dispdata->drm_fd = KMSDRM_gbm_device_get_fd(dispdata->gbm);\n"
                           "    }")
                   text = text[:m.start()] + repl + text[m.end():]
                   print("OK: libmali gbm_device_get_fd() workaround")
 
-          # 3) Echten Fehler loggen
-          old_caller = "if (!KMSDRM_CreateSurfaces(_this, window)) {\n        return SDL_SetError(\"Can't window GBM/EGL surfaces on window creation.\");\n    }"
-          new_caller = ("if (!KMSDRM_CreateSurfaces(_this, window)) {\n"
-                        "        SDL_LogError(SDL_LOG_CATEGORY_VIDEO, \"NZP: KMSDRM_CreateSurfaces failed: %s\", SDL_GetError());\n"
-                        "        return SDL_SetError(\"Can't window GBM/EGL surfaces on window creation.\");\n"
-                        "    }")
-          if old_caller in text:
-              text = text.replace(old_caller, new_caller, 1)
-              print("OK: KMSDRM_CreateWindow logs real error")
-          elif "NZP: KMSDRM_CreateSurfaces failed" in text:
-              print("already logs error")
-
           vid.write_text(text)
-
-          # 4) eglGetPlatformDisplayEXT für Mali (falls nicht in 2.30.11)
-          egl = pathlib.Path(sys.argv[1] + "/src/video/kmsdrm/SDL_kmsdrmopengles.c")
-          if egl.exists():
-              et = egl.read_text()
-              if "NZP_MALI_EGL_PLATFORM" not in et:
-                  pat = re.compile(r"(eglGetDisplay\s*\([^)]*\))")
-                  m = pat.search(et)
-                  if m:
-                      repl = ("/* NZP_MALI_EGL_PLATFORM: eglGetPlatformDisplayEXT for Mali */\n"
-                              "    {\n"
-                              "        PFNEGLGETPLATFORMDISPLAYEXTPROC getPlatformDisplay =\n"
-                              "            (PFNEGLGETPLATFORMDISPLAYEXTPROC)eglGetProcAddress(\"eglGetPlatformDisplayEXT\");\n"
-                              "        if (getPlatformDisplay) {\n"
-                              "            display = getPlatformDisplay(EGL_PLATFORM_GBM_KHR, gbm_dev, NULL);\n"
-                              "        }\n"
-                              "    }\n"
-                              "    if (display == EGL_NO_DISPLAY) {\n"
-                              "        display = " + m.group(1).strip() + ";\n"
-                              "    }")
-                      et = et[:m.start()] + repl + et[m.end():]
-                      egl.write_text(et)
-                      print("OK: eglGetPlatformDisplayEXT for Mali")
-                  else:
-                      print("WARN: eglGetDisplay not found")
-              else:
-                  print("eglGetPlatformDisplayEXT already present")
           PYEOF
 
           cat > "$RUNNER_TEMP/nzp-build/build.sh" << 'BUILDEOF'
@@ -172,17 +151,21 @@ jobs:
           export PKG_CONFIG_LIBDIR=/usr/local/lib/pkgconfig:/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
           export PKG_CONFIG_SYSROOT_DIR=/
 
-          # SDL 2.30.11: enthält Issue #10675 Fix (KMSDRM_GetSym, RK3326)
           SDL2_VER="2.30.11"
           cd /tmp
           wget -q "https://github.com/libsdl-org/SDL/releases/download/release-${SDL2_VER}/SDL2-${SDL2_VER}.tar.gz"
           tar xf "SDL2-${SDL2_VER}.tar.gz"
           cd "SDL2-${SDL2_VER}"
 
-          echo "=== SDL Mali Patches ==="
-          python3 /tmp/patch_sdl_mali.py .
+          echo "=== Apply official patch d501f6d (KMSDRM_GetSym optional) ==="
+          wget -q -O /tmp/d501f6d.patch \
+            "https://github.com/libsdl-org/SDL/commit/d501f6d.patch"
+          git apply /tmp/d501f6d.patch || { echo "FATAL: d501f6d patch failed"; exit 1; }
+          echo "OK: d501f6d applied"
 
-          # C90-Werror entschärfen (SDL 2.30.11 hat latente C90-Verstöße)
+          echo "=== SDL KMSDRM + Mali Patches ==="
+          python3 /tmp/patch_sdl_kmsdrm.py .
+
           CFLAGS="-fPIC -Wno-declaration-after-statement -Wno-error=declaration-after-statement" \
           LDFLAGS="-L/usr/lib/aarch64-linux-gnu" \
           ./configure --prefix=/usr/local --host=aarch64-linux-gnu \
@@ -278,7 +261,7 @@ jobs:
             -v "$RUNNER_TEMP/nzp-build/patch_prcmds.py:/tmp/patch_prcmds.py:ro" \
             -v "$RUNNER_TEMP/nzp-build/patch_makefile.py:/tmp/patch_makefile.py:ro" \
             -v "$RUNNER_TEMP/nzp-build/patch_glvidegl.py:/tmp/patch_glvidegl.py:ro" \
-            -v "$RUNNER_TEMP/nzp-build/patch_sdl_mali.py:/tmp/patch_sdl_mali.py:ro" \
+            -v "$RUNNER_TEMP/nzp-build/patch_sdl_kmsdrm.py:/tmp/patch_sdl_kmsdrm.py:ro" \
             -v "$RUNNER_TEMP/nzp-build/build.sh:/tmp/build.sh:ro" \
             -w /workspace \
             ubuntu:20.04 bash /tmp/build.sh
