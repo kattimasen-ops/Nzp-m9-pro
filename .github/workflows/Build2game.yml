@@ -111,8 +111,6 @@ jobs:
           if "NZP: format autodetect" in text:
               print("already format-autodetect")
           else:
-              # Ersetze den kompletten Deklarationsblock und fuege den Autodetect-Block
-              # erst NACH allen Deklarationen ein (C90-konform).
               decl_re = re.compile(
                   r"(\s*)uint32_t\s+surface_fmt\s*=\s*GBM_FORMAT_ARGB8888\s*;\s*\n"
                   r"\s*uint32_t\s+surface_flags\s*=\s*GBM_BO_USE_SCANOUT\s*\|\s*GBM_BO_USE_RENDERING\s*;\s*\n"
@@ -122,7 +120,7 @@ jobs:
               )
               m = decl_re.search(text)
               if m:
-                  indent = m.group(1)  # Einrueckung (typisch 4 Leerzeichen)
+                  indent = m.group(1)
                   replacement = (
                       indent + "uint32_t surface_fmt = 0; /* NZP: format autodetect */\n"
                       + indent + "uint32_t surface_flags = GBM_BO_USE_SCANOUT | GBM_BO_USE_RENDERING;\n"
@@ -391,6 +389,63 @@ jobs:
             -w /workspace \
             ubuntu:20.04 bash /tmp/build.sh
 
+      # ==========================================================================
+      # NEUER SCHRITT: Mali-Hook + Startscript für das Artifact vorbereiten
+      # ==========================================================================
+      - name: Prepare Mali Hook & Startscript for Artifact
+        run: |
+          set -euo pipefail
+          RELEASE_DIR="$GITHUB_WORKSPACE/engine/release"
+          MALI_HOOK_DIR="$RELEASE_DIR/mali-hook"
+          mkdir -p "$MALI_HOOK_DIR"
+
+          echo "=== Lade Mali-Paket (Bifrost G31, GBM, arm64) ==="
+          MALI_DEB="libmali-bifrost-g31-g13p0-gbm_1.9-1+debian1_arm64.deb"
+          MALI_URL="https://hina.lysator.liu.se/pub/opensuse/repositories/home:/amazingfate:/libmali-rockchip/Debian_Testing/arm64/${MALI_DEB}"
+          wget -q -O "/tmp/${MALI_DEB}" "$MALI_URL"
+
+          echo "=== Entpacke Mali-Paket ==="
+          mkdir -p /tmp/mali-extract
+          dpkg-deb -x "/tmp/${MALI_DEB}" /tmp/mali-extract
+
+          echo "=== Extrahiere Hook und Mali-Blob ==="
+          # Die Hook-Bibliothek liegt typischerweise unter usr/lib/aarch64-linux-gnu/
+          HOOK_SRC=$(find /tmp/mali-extract -name 'libmali-hook.so*' -type f | head -1)
+          BLOB_SRC=$(find /tmp/mali-extract -name 'libmali-bifrost-g31-g13p0-gbm.so' -type f | head -1)
+
+          if [ -z "$HOOK_SRC" ] || [ -z "$BLOB_SRC" ]; then
+            echo "FEHLER: Hook oder Blob im entpackten Paket nicht gefunden."
+            echo "Inhalt des Pakets:"
+            find /tmp/mali-extract -name '*.so*' | head -20
+            exit 1
+          fi
+
+          cp -L "$HOOK_SRC" "$MALI_HOOK_DIR/libmali-hook.so"
+          cp -L "$BLOB_SRC" "$MALI_HOOK_DIR/libmali-bifrost-g31-g13p0-gbm.so"
+          echo "OK: libmali-hook.so und libmali-bifrost-g31-g13p0-gbm.so kopiert."
+
+          echo "=== Kopiere Startscript ==="
+          # Das Startscript wird aus dem Repository in den Release-Ordner kopiert.
+          # Stelle sicher, dass die Datei "Nazi Zombies.sh" im Repo unter
+          # .github/workflows/ oder einem bekannten Pfad liegt.
+          # Annahme: Die Datei liegt im Repo-Root oder wird hier eingefügt.
+          # Falls sie nicht existiert, erstelle sie aus dem Inhalt dieses Workflows.
+          # (In der Praxis: Die Datei sollte im Repo vorhanden sein.)
+          # Platzhalter: Wir gehen davon aus, dass sie bereits im Repo liegt.
+          # Kopiere sie, falls vorhanden.
+          if [ -f "$GITHUB_WORKSPACE/Nazi Zombies.sh" ]; then
+            cp "$GITHUB_WORKSPACE/Nazi Zombies.sh" "$RELEASE_DIR/Nazi Zombies.sh"
+            chmod +x "$RELEASE_DIR/Nazi Zombies.sh"
+            echo "OK: Nazi Zombies.sh kopiert."
+          else
+            echo "WARNUNG: Nazi Zombies.sh nicht im Repo-Root gefunden."
+            echo "Bitte die Datei manuell in den Release-Ordner legen."
+          fi
+
+          echo "=== Inhalt des Release-Ordners ==="
+          ls -la "$RELEASE_DIR"
+          ls -la "$MALI_HOOK_DIR"
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -400,4 +455,7 @@ jobs:
             engine/release/nzportablearm64.db
             engine/release/libSDL2-2.0.so.0
             engine/release/libSDL2-2.0.so
+            engine/release/mali-hook/libmali-hook.so
+            engine/release/mali-hook/libmali-bifrost-g31-g13p0-gbm.so
+            engine/release/Nazi Zombies.sh
           if-no-files-found: error
