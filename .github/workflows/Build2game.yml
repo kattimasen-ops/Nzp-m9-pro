@@ -396,10 +396,7 @@ jobs:
           MALI_HOOK_DIR="$RELEASE_DIR/mali-hook"
 
           echo "=== Korrigiere Berechtigungen für $RELEASE_DIR ==="
-          # Der Docker-Schritt hat den Ordner als root erstellt.
-          # Der Runner-Benutzer (UID 1001) braucht Schreibzugriff.
           sudo chown -R "$(id -u):$(id -g)" "$RELEASE_DIR"
-
           mkdir -p "$MALI_HOOK_DIR"
 
           echo "=== Lade Mali-Paket (Bifrost G31, GBM, arm64) ==="
@@ -412,19 +409,33 @@ jobs:
           dpkg-deb -x "/tmp/${MALI_DEB}" /tmp/mali-extract
 
           echo "=== Extrahiere Hook und Mali-Blob ==="
-          HOOK_SRC=$(find /tmp/mali-extract -name 'libmali-hook.so*' -type f | head -1)
-          BLOB_SRC=$(find /tmp/mali-extract -name 'libmali-bifrost-g31-g13p0-gbm.so' -type f | head -1)
+          # Symlinks zulassen: -type f -o -type l
+          HOOK_SRC=$(find /tmp/mali-extract -name 'libmali-hook.so*' \( -type f -o -type l \) | head -1)
+          BLOB_SRC=$(find /tmp/mali-extract -name 'libmali-bifrost-g31-g13p0-gbm.so' \( -type f -o -type l \) | head -1)
 
           if [ -z "$HOOK_SRC" ] || [ -z "$BLOB_SRC" ]; then
             echo "FEHLER: Hook oder Blob im entpackten Paket nicht gefunden."
             echo "Inhalt des Pakets:"
-            find /tmp/mali-extract -name '*.so*' | head -20
+            find /tmp/mali-extract -name '*.so*' | head -30
             exit 1
           fi
 
+          echo "Hook-Quelle: $HOOK_SRC"
+          echo "Blob-Quelle: $BLOB_SRC"
+
+          # -L dereferenziert Symlinks: wir kopieren die echten Dateien
           cp -L "$HOOK_SRC" "$MALI_HOOK_DIR/libmali-hook.so"
           cp -L "$BLOB_SRC" "$MALI_HOOK_DIR/libmali-bifrost-g31-g13p0-gbm.so"
           echo "OK: libmali-hook.so und libmali-bifrost-g31-g13p0-gbm.so kopiert."
+
+          # Sanity-Check: Dateien muessen existieren und nicht leer sein
+          ls -la "$MALI_HOOK_DIR"
+          for f in "$MALI_HOOK_DIR/libmali-hook.so" "$MALI_HOOK_DIR/libmali-bifrost-g31-g13p0-gbm.so"; do
+            if [ ! -s "$f" ]; then
+              echo "FEHLER: $f ist leer oder fehlt"
+              exit 1
+            fi
+          done
 
           echo "=== Kopiere Startscript ==="
           if [ -f "$GITHUB_WORKSPACE/Nazi Zombies.sh" ]; then
@@ -433,7 +444,6 @@ jobs:
             echo "OK: Nazi Zombies.sh kopiert."
           else
             echo "WARNUNG: Nazi Zombies.sh nicht im Repo-Root gefunden."
-            echo "Bitte die Datei manuell in den Release-Ordner legen."
           fi
 
           echo "=== Inhalt des Release-Ordners ==="
