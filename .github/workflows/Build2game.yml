@@ -74,16 +74,15 @@ jobs:
           PYEOF
 
           cat > "$RUNNER_TEMP/nzp-build/patch_sdl_kmsdrm.py" << 'PYEOF'
-          import sys, pathlib
+          import sys, pathlib, re
           vid = pathlib.Path(sys.argv[1] + "/src/video/kmsdrm/SDL_kmsdrmvideo.c")
           text = vid.read_text()
 
-          # 1) Invertierte Prüfung in KMSDRM_CreateWindow korrigieren (zeilenbasiert)
+          # 1) Invertierte Prüfung in KMSDRM_CreateWindow (zeilenbasiert)
           lines = text.splitlines()
           fixed = False
           for i, line in enumerate(lines):
               if 'ret = KMSDRM_CreateSurfaces(_this, window);' in line:
-                  # Suche die nächste Zeile mit 'if (ret == 0)'
                   for j in range(i+1, min(i+6, len(lines))):
                       if 'if (ret == 0)' in lines[j]:
                           lines[j] = lines[j].replace('if (ret == 0)', 'if (ret != 0)')
@@ -96,18 +95,41 @@ jobs:
               print("WARN: invertierte Prüfung nicht gefunden (evtl. bereits korrekt)")
           text = '\n'.join(lines)
 
-          # 2) GBM-Format auf XRGB8888 (Mali G31, Bug 3792)
+          # 2) Format-Autodetect: ARGB8888 durch Liste ersetzen (Commit 6fd2c83)
           old_fmt = "uint32_t surface_fmt = GBM_FORMAT_ARGB8888;"
-          new_fmt = "uint32_t surface_fmt = GBM_FORMAT_XRGB8888; /* NZP: Mali G31 */"
           if old_fmt in text:
-              text = text.replace(old_fmt, new_fmt, 1)
-              print("OK: GBM_FORMAT_ARGB8888 -> XRGB8888")
-          elif new_fmt in text:
-              print("already XRGB8888")
+              new_lines = [
+                  "uint32_t surface_fmt = 0; /* NZP: format autodetect */",
+                  "{",
+                  "    static const uint32_t nzp_gbm_formats[] = {",
+                  "        GBM_FORMAT_XRGB8888, GBM_FORMAT_ARGB8888,",
+                  "        GBM_FORMAT_RGB565,   GBM_FORMAT_BGR565,",
+                  "        GBM_FORMAT_XBGR8888, GBM_FORMAT_ABGR8888,",
+                  "        GBM_FORMAT_RGBX8888, GBM_FORMAT_RGBA8888,",
+                  "        GBM_FORMAT_BGRX8888, GBM_FORMAT_BGRA8888",
+                  "    };",
+                  "    int nzp_i;",
+                  "    for (nzp_i = 0; nzp_i < (int)(sizeof(nzp_gbm_formats)/sizeof(nzp_gbm_formats[0])); nzp_i++) {",
+                  "        if (KMSDRM_gbm_device_is_format_supported(viddata->gbm_dev,",
+                  "                                                  nzp_gbm_formats[nzp_i], surface_flags)) {",
+                  "            surface_fmt = nzp_gbm_formats[nzp_i];",
+                  "            SDL_Log(\"NZP: using GBM format 0x%08x\", surface_fmt);",
+                  "            break;",
+                  "        }",
+                  "    }",
+                  "    if (surface_fmt == 0) {",
+                  "        surface_fmt = GBM_FORMAT_XRGB8888;",
+                  "        SDL_LogWarn(SDL_LOG_CATEGORY_VIDEO, \"NZP: no format supported, fallback XRGB8888\");",
+                  "    }",
+                  "}",
+              ]
+              text = text.replace(old_fmt, "\n".join(new_lines), 1)
+              print("OK: Format-Autodetect eingefügt")
+          elif "NZP: format autodetect" in text:
+              print("already format-autodetect")
 
           # 3) libmali gbm_device_get_fd() Workaround
           if "NZP_LIBMALI_FD_FIX" not in text:
-              import re
               pat = re.compile(r"(dispdata->gbm\s*=\s*KMSDRM_gbm_create_device\s*\([^;]+\);)")
               m = pat.search(text)
               if m:
@@ -118,6 +140,53 @@ jobs:
                           "    }")
                   text = text[:m.start()] + repl + text[m.end():]
                   print("OK: libmali gbm_device_get_fd() workaround")
+
+          vid.write_text(text)
+          PYEOF
+
+          cat > "$RUNNER_TEMP/nzp-build/patch_getsym_fallback.py" << 'PYEOF'
+          # Fallback, falls der offizielle d501f6d-Patch nicht angewendet werden kann
+          import pathlib, re
+          vid = pathlib.Path("src/video/kmsdrm/SDL_kmsdrmvideo.c")
+          text = vid.read_text()
+          if "KMSDRM_GetSym(const char *fnname, int *pHasModule, bool required)" in text:
+              print("GetSym already has required param"); raise SystemExit(0)
+
+          old_sig = "static void *KMSDRM_GetSym(const char *fnname, int *pHasModule)"
+          new_sig = "static void *KMSDRM_GetSym(const char *fnname, int *pHasModule, bool required)"
+          if old_sig in text:
+              text = text.replace(old_sig, new_sig, 1)
+              print("OK: KMSDRM_GetSym -> required param")
+          else:
+              print("WARN: KMSDRM_GetSym signature not found")
+
+          old_kill = "if (!fn) {\n        *pHasModule = 0; // kill this module."
+          new_kill = "if (!fn && required) {\n        *pHasModule = 0; // kill this module."
+          if old_kill in text:
+              text = text.replace(old_kill, new_kill, 1)
+              print("OK: missing symbols no longer kill module unless required")
+          else:
+              print("WARN: kill-module block not found")
+
+          # Optionale Symbole in SDL_kmsdrmsym.h markieren
+          sym_h = pathlib.Path("src/video/kmsdrm/SDL_kmsdrmsym.h")
+          if sym_h.exists():
+              st = sym_h.read_text()
+              optional = [
+                  "drmModeAddFB2WithModifiers",
+                  "gbm_bo_get_modifier",
+                  "gbm_bo_get_plane_count",
+                  "gbm_bo_get_offset",
+                  "gbm_bo_get_stride_for_plane",
+              ]
+              for fn in optional:
+                  st = re.sub(
+                      r"(SDL_KMSDRM_SYM\([^,]+,\s*" + re.escape(fn) + r")",
+                      r"SDL_KMSDRM_SYM_OPT\1",
+                      st,
+                  )
+              sym_h.write_text(st)
+              print("OK: optional symbols marked in SDL_kmsdrmsym.h")
 
           vid.write_text(text)
           PYEOF
@@ -138,7 +207,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            build-essential make git pkg-config wget ca-certificates python3
+            build-essential make git pkg-config wget ca-certificates python3 patch
 
           git config --global --add safe.directory /workspace
 
@@ -157,11 +226,15 @@ jobs:
           tar xf "SDL2-${SDL2_VER}.tar.gz"
           cd "SDL2-${SDL2_VER}"
 
-          echo "=== Apply official patch d501f6d (KMSDRM_GetSym optional) ==="
-          wget -q -O /tmp/d501f6d.patch \
-            "https://github.com/libsdl-org/SDL/commit/d501f6d.patch"
-          git apply /tmp/d501f6d.patch || { echo "FATAL: d501f6d patch failed"; exit 1; }
-          echo "OK: d501f6d applied"
+          echo "=== Apply official d501f6d (KMSDRM_GetSym optional) ==="
+          PATCH_URL="https://github.com/libsdl-org/SDL/commit/d501f6db07d4a067f7261d1ef51bec199f6d421f.patch"
+          if wget -q -O /tmp/d501f6d.patch "$PATCH_URL" && \
+             patch -p1 --forward --no-backup-if-mismatch -i /tmp/d501f6d.patch; then
+            echo "OK: d501f6d applied via patch -p1"
+          else
+            echo "WARN: d501f6d failed, applying manual GetSym fallback"
+            python3 /tmp/patch_getsym_fallback.py
+          fi
 
           echo "=== SDL KMSDRM + Mali Patches ==="
           python3 /tmp/patch_sdl_kmsdrm.py .
@@ -262,6 +335,7 @@ jobs:
             -v "$RUNNER_TEMP/nzp-build/patch_makefile.py:/tmp/patch_makefile.py:ro" \
             -v "$RUNNER_TEMP/nzp-build/patch_glvidegl.py:/tmp/patch_glvidegl.py:ro" \
             -v "$RUNNER_TEMP/nzp-build/patch_sdl_kmsdrm.py:/tmp/patch_sdl_kmsdrm.py:ro" \
+            -v "$RUNNER_TEMP/nzp-build/patch_getsym_fallback.py:/tmp/patch_getsym_fallback.py:ro" \
             -v "$RUNNER_TEMP/nzp-build/build.sh:/tmp/build.sh:ro" \
             -w /workspace \
             ubuntu:20.04 bash /tmp/build.sh
