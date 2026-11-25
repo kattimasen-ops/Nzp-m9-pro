@@ -232,7 +232,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            build-essential make git pkg-config wget ca-certificates python3 patch file
+            build-essential make git pkg-config wget ca-certificates python3 patch file patchelf
 
           git config --global --add safe.directory /workspace
 
@@ -381,30 +381,32 @@ jobs:
 
           MALI_BASE="/tmp/mali-extract/usr/lib/aarch64-linux-gnu"
 
-          echo "=== Kopiere Hook (mit korrekter SONAME libmali-hook.so.1) ==="
-          HOOK_REAL=$(find "$MALI_BASE" -name 'libmali-hook.so.1.9.0' -o -name 'libmali-hook.so.1' \( -type f -o -type l \) | head -1)
-          if [ -z "$HOOK_REAL" ]; then
-            HOOK_REAL=$(find "$MALI_BASE" -name 'libmali-hook.so*' \( -type f -o -type l \) | head -1)
-          fi
+          echo "=== Kopiere Hook (SONAME libmali-hook.so.1) ==="
+          HOOK_REAL=$(find "$MALI_BASE" -name 'libmali-hook.so*' \( -type f -o -type l \) | head -1)
           if [ -z "$HOOK_REAL" ]; then
             echo "FEHLER: libmali-hook.so nicht gefunden"; exit 1
           fi
-          # Als libmali-hook.so.1 ablegen (SONAME-konform) und libmali-hook.so als Alias
           cp -L "$HOOK_REAL" "$MALI_HOOK_DIR/libmali-hook.so.1"
           ln -sf "libmali-hook.so.1" "$MALI_HOOK_DIR/libmali-hook.so"
-          echo "Hook: $(file -b "$MALI_HOOK_DIR/libmali-hook.so.1")"
 
-          echo "=== Kopiere Mali-Treiber ==="
+          echo "=== Kopiere Mali-Treiber (SONAME libmali.so.1) ==="
           BLOB_REAL=$(find "$MALI_BASE" -name 'libmali-bifrost-g31-g13p0-gbm.so' \( -type f -o -type l \) | head -1)
           if [ -z "$BLOB_REAL" ]; then
             echo "FEHLER: Mali-Treiber nicht gefunden"; exit 1
           fi
           cp -L "$BLOB_REAL" "$MALI_HOOK_DIR/libmali-bifrost-g31-g13p0-gbm.so"
-          # Aliase fuer libmali.so und libmali.so.1
           cd "$MALI_HOOK_DIR"
           ln -sf "libmali-bifrost-g31-g13p0-gbm.so" libmali.so
           ln -sf "libmali-bifrost-g31-g13p0-gbm.so" libmali.so.1
-          echo "Treiber: $(file -b "$MALI_HOOK_DIR/libmali-bifrost-g31-g13p0-gbm.so")"
+
+          echo "=== Korrigiere SONAMEs mit patchelf ==="
+          if command -v patchelf >/dev/null 2>&1; then
+            patchelf --set-soname libmali.so.1 "$MALI_HOOK_DIR/libmali-bifrost-g31-g13p0-gbm.so" 2>/dev/null || true
+            patchelf --set-soname libmali-hook.so.1 "$MALI_HOOK_DIR/libmali-hook.so.1" 2>/dev/null || true
+            echo "OK: SONAMEs gesetzt"
+          else
+            echo "WARN: patchelf nicht verfuegbar"
+          fi
 
           echo "=== Kopiere Wrapper aus mali/ (dereferenziert) ==="
           MALI_WRAPPER_DIR="$MALI_BASE/mali"
@@ -412,15 +414,10 @@ jobs:
             for f in "$MALI_WRAPPER_DIR"/*.so*; do
               [ -e "$f" ] || continue
               cp -L "$f" "$MALI_HOOK_DIR/$(basename "$f")"
-              echo "  -> $(basename "$f") ($(stat -c%s "$f" 2>/dev/null || echo '?') bytes)"
+              echo "  -> $(basename "$f")"
             done
           else
-            echo "WARN: mali/ Wrapper-Ordner nicht gefunden, erstelle manuelle Symlinks"
-            cd "$MALI_HOOK_DIR"
-            for name in libEGL.so.1 libEGL.so libGLESv2.so.2 libGLESv2.so \
-                        libGLESv1_CM.so.1 libGLESv1_CM.so; do
-              ln -sf "libmali-hook.so.1" "$name"
-            done
+            echo "WARN: mali/ Wrapper-Ordner nicht gefunden"
           fi
 
           echo "=== Inhalt von mali-hook/ ==="
