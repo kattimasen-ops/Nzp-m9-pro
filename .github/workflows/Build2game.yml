@@ -10,7 +10,7 @@ on:
 jobs:
   build-rk3326:
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
       - name: Checkout FTEQW
@@ -347,7 +347,7 @@ jobs:
           md5sum libSDL2-2.0.so.0.3000.10 nzportablearm64 || true
           BUILDEOF
 
-      - name: Cross-Compile in ubuntu:20.04
+      - name: Cross-Compile Engine & SDL2 in ubuntu:20.04
         run: |
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/workspace" \
@@ -360,7 +360,7 @@ jobs:
             -w /workspace \
             ubuntu:20.04 bash /tmp/build.sh
 
-      - name: Prepare Mali Hook & Startscript for Artifact
+      - name: Build libmali-hook from source (GLIBC 2.31)
         run: |
           set -euo pipefail
           RELEASE_DIR="$GITHUB_WORKSPACE/engine/release"
@@ -370,54 +370,83 @@ jobs:
           sudo chown -R "$(id -u):$(id -g)" "$RELEASE_DIR"
           mkdir -p "$MALI_HOOK_DIR"
 
-          echo "=== Lade Mali-Paket (Bifrost G31, GBM, arm64) ==="
-          MALI_DEB="libmali-bifrost-g31-g13p0-gbm_1.9-1+debian1_arm64.deb"
-          MALI_URL="https://hina.lysator.liu.se/pub/opensuse/repositories/home:/amazingfate:/libmali-rockchip/Debian_Testing/arm64/${MALI_DEB}"
-          wget -q -O "/tmp/${MALI_DEB}" "$MALI_URL"
+          echo "=== Installiere Build-Abhängigkeiten ==="
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq meson ninja-build patchelf pkg-config
+          # libdrm-dev und libgbm-dev für den Host (x86_64) werden für Meson benötigt,
+          # aber wir cross-kompilieren, daher brauchen wir die arm64-Versionen.
+          # Die arm64-Pakete sind bereits aus dem Docker-Schritt vorhanden.
 
-          echo "=== Entpacke Mali-Paket ==="
-          rm -rf /tmp/mali-extract && mkdir -p /tmp/mali-extract
-          dpkg-deb -x "/tmp/${MALI_DEB}" /tmp/mali-extract
+          echo "=== Klone libmali-rockchip (tsukumijima) ==="
+          rm -rf /tmp/libmali-rockchip
+          git clone --depth 1 https://github.com/tsukumijima/libmali-rockchip.git /tmp/libmali-rockchip
+          cd /tmp/libmali-rockchip
 
-          MALI_BASE="/tmp/mali-extract/usr/lib/aarch64-linux-gnu"
+          echo "=== Erstelle Cross-File für Meson ==="
+          cat > /tmp/aarch64-cross.ini << 'EOF'
+          [binaries]
+          c = 'aarch64-linux-gnu-gcc'
+          cpp = 'aarch64-linux-gnu-g++'
+          ar = 'aarch64-linux-gnu-ar'
+          strip = 'aarch64-linux-gnu-strip'
+          pkgconfig = 'aarch64-linux-gnu-pkg-config'
+          
+          [host_machine]
+          system = 'linux'
+          cpu_family = 'aarch64'
+          cpu = 'aarch64'
+          endian = 'little'
+          EOF
 
-          echo "=== Kopiere Hook (SONAME libmali-hook.so.1) ==="
-          HOOK_REAL=$(find "$MALI_BASE" -name 'libmali-hook.so*' \( -type f -o -type l \) | head -1)
-          if [ -z "$HOOK_REAL" ]; then
-            echo "FEHLER: libmali-hook.so nicht gefunden"; exit 1
+          echo "=== Konfiguriere Meson für Bifrost G31 (GBM) ==="
+          # Wir bauen nur die Hook-Bibliothek und die Wrapper.
+          # Die Meson-Optionen steuern die Auswahl des vorkompilierten Treibers.
+          meson setup builddir \
+            --cross-file /tmp/aarch64-cross.ini \
+            --prefix=/usr/local \
+            --libdir=lib/aarch64-linux-gnu \
+            -Dgpu=bifrost-g31 \
+            -Dversion=g13p0 \
+            -Dsubversion=gbm \
+            -Dplatform=gbm \
+            -Darch=arm64 \
+            -Dopencl-icd=false \
+            -Dvendor-package=false \
+            -Dwrappers=enabled \
+            -Dhooks=true
+
+          echo "=== Baue Hook und Wrapper ==="
+          ninja -C builddir
+
+          echo "=== Kopiere die kompilierten Bibliotheken nach $MALI_HOOK_DIR ==="
+          # Finde die gebauten .so-Dateien
+          find builddir -name 'libmali-hook.so*' -o -name 'libEGL.so*' -o -name 'libGLESv2.so*' -o -name 'libgbm.so*' | while read -r f; do
+            cp -L "$f" "$MALI_HOOK_DIR/$(basename "$f")"
+            echo "  -> $(basename "$f")"
+          done
+
+          echo "=== Kopiere den vorkompilierten Mali-Treiber ==="
+          # Der Treiber ist im libmali-rockchip-Repo unter lib/ zu finden.
+          # Wir suchen die passende Datei für Bifrost G31, GBM.
+          DRIVER=$(find /tmp/libmali-rockchip/lib -name 'libmali-bifrost-g31-g13p0-gbm.so' | head -1)
+          if [ -z "$DRIVER" ]; then
+            # Fallback: Suche nach einer allgemeineren G31-GBM-Datei
+            DRIVER=$(find /tmp/libmali-rockchip/lib -name 'libmali-bifrost-g31-*gbm*.so' | head -1)
           fi
-          cp -L "$HOOK_REAL" "$MALI_HOOK_DIR/libmali-hook.so.1"
-          ln -sf "libmali-hook.so.1" "$MALI_HOOK_DIR/libmali-hook.so"
-
-          echo "=== Kopiere Mali-Treiber (SONAME libmali.so.1) ==="
-          BLOB_REAL=$(find "$MALI_BASE" -name 'libmali-bifrost-g31-g13p0-gbm.so' \( -type f -o -type l \) | head -1)
-          if [ -z "$BLOB_REAL" ]; then
-            echo "FEHLER: Mali-Treiber nicht gefunden"; exit 1
+          if [ -z "$DRIVER" ]; then
+            echo "FEHLER: Mali-Treiber für Bifrost G31 GBM nicht gefunden"
+            exit 1
           fi
-          cp -L "$BLOB_REAL" "$MALI_HOOK_DIR/libmali-bifrost-g31-g13p0-gbm.so"
+          cp -L "$DRIVER" "$MALI_HOOK_DIR/libmali-bifrost-g31-g13p0-gbm.so"
           cd "$MALI_HOOK_DIR"
           ln -sf "libmali-bifrost-g31-g13p0-gbm.so" libmali.so
           ln -sf "libmali-bifrost-g31-g13p0-gbm.so" libmali.so.1
 
-          echo "=== Korrigiere SONAMEs mit patchelf ==="
+          echo "=== Setze SONAMEs mit patchelf ==="
           if command -v patchelf >/dev/null 2>&1; then
             patchelf --set-soname libmali.so.1 "$MALI_HOOK_DIR/libmali-bifrost-g31-g13p0-gbm.so" 2>/dev/null || true
             patchelf --set-soname libmali-hook.so.1 "$MALI_HOOK_DIR/libmali-hook.so.1" 2>/dev/null || true
             echo "OK: SONAMEs gesetzt"
-          else
-            echo "WARN: patchelf nicht verfuegbar"
-          fi
-
-          echo "=== Kopiere Wrapper aus mali/ (dereferenziert) ==="
-          MALI_WRAPPER_DIR="$MALI_BASE/mali"
-          if [ -d "$MALI_WRAPPER_DIR" ]; then
-            for f in "$MALI_WRAPPER_DIR"/*.so*; do
-              [ -e "$f" ] || continue
-              cp -L "$f" "$MALI_HOOK_DIR/$(basename "$f")"
-              echo "  -> $(basename "$f")"
-            done
-          else
-            echo "WARN: mali/ Wrapper-Ordner nicht gefunden"
           fi
 
           echo "=== Inhalt von mali-hook/ ==="
@@ -431,9 +460,6 @@ jobs:
           else
             echo "WARNUNG: Nazi Zombies.sh nicht im Repo-Root gefunden."
           fi
-
-          echo "=== Inhalt des Release-Ordners ==="
-          ls -la "$RELEASE_DIR"
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
