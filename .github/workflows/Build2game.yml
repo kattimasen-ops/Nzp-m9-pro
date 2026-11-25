@@ -232,7 +232,7 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             gcc-aarch64-linux-gnu g++-aarch64-linux-gnu binutils-aarch64-linux-gnu \
-            build-essential make git pkg-config wget ca-certificates python3 patch file patchelf
+            build-essential make git pkg-config wget ca-certificates python3 patch file patchelf meson ninja-build
 
           git config --global --add safe.directory /workspace
 
@@ -360,106 +360,102 @@ jobs:
             -w /workspace \
             ubuntu:20.04 bash /tmp/build.sh
 
-      - name: Build libmali-hook from source (GLIBC 2.31)
+      - name: Build Mali Hook (GLIBC 2.31)
         run: |
-          set -euo pipefail
-          RELEASE_DIR="$GITHUB_WORKSPACE/engine/release"
-          MALI_HOOK_DIR="$RELEASE_DIR/mali-hook"
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/workspace" \
+            -w /workspace \
+            ubuntu:20.04 bash -c '
+              set -euo pipefail
+              export DEBIAN_FRONTEND=noninteractive
 
-          echo "=== Korrigiere Berechtigungen für $RELEASE_DIR ==="
-          sudo chown -R "$(id -u):$(id -g)" "$RELEASE_DIR"
-          mkdir -p "$MALI_HOOK_DIR"
+              apt-get update -qq
+              apt-get install -y -qq \
+                gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+                build-essential make git pkg-config wget ca-certificates python3 patch file patchelf meson ninja-build
 
-          echo "=== Installiere Build-Abhängigkeiten ==="
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq meson ninja-build patchelf pkg-config
-          # libdrm-dev und libgbm-dev für den Host (x86_64) werden für Meson benötigt,
-          # aber wir cross-kompilieren, daher brauchen wir die arm64-Versionen.
-          # Die arm64-Pakete sind bereits aus dem Docker-Schritt vorhanden.
+              RELEASE_DIR="/workspace/engine/release"
+              MALI_HOOK_DIR="$RELEASE_DIR/mali-hook"
+              mkdir -p "$MALI_HOOK_DIR"
 
-          echo "=== Klone libmali-rockchip (tsukumijima) ==="
-          rm -rf /tmp/libmali-rockchip
-          git clone --depth 1 https://github.com/tsukumijima/libmali-rockchip.git /tmp/libmali-rockchip
-          cd /tmp/libmali-rockchip
+              echo "=== Klone libmali-rockchip (tsukumijima) ==="
+              rm -rf /tmp/libmali-rockchip
+              git clone --depth 1 https://github.com/tsukumijima/libmali-rockchip.git /tmp/libmali-rockchip
+              cd /tmp/libmali-rockchip
 
-          echo "=== Erstelle Cross-File für Meson ==="
-          cat > /tmp/aarch64-cross.ini << 'EOF'
-          [binaries]
-          c = 'aarch64-linux-gnu-gcc'
-          cpp = 'aarch64-linux-gnu-g++'
-          ar = 'aarch64-linux-gnu-ar'
-          strip = 'aarch64-linux-gnu-strip'
-          pkgconfig = 'aarch64-linux-gnu-pkg-config'
-          
-          [host_machine]
-          system = 'linux'
-          cpu_family = 'aarch64'
-          cpu = 'aarch64'
-          endian = 'little'
-          EOF
+              echo "=== Erstelle Cross-File für Meson ==="
+              cat > /tmp/aarch64-cross.ini << "EOF"
+[binaries]
+c = "aarch64-linux-gnu-gcc"
+cpp = "aarch64-linux-gnu-g++"
+ar = "aarch64-linux-gnu-ar"
+strip = "aarch64-linux-gnu-strip"
+pkgconfig = "aarch64-linux-gnu-pkg-config"
 
-          echo "=== Konfiguriere Meson für Bifrost G31 (GBM) ==="
-          # Wir bauen nur die Hook-Bibliothek und die Wrapper.
-          # Die Meson-Optionen steuern die Auswahl des vorkompilierten Treibers.
-          meson setup builddir \
-            --cross-file /tmp/aarch64-cross.ini \
-            --prefix=/usr/local \
-            --libdir=lib/aarch64-linux-gnu \
-            -Dgpu=bifrost-g31 \
-            -Dversion=g13p0 \
-            -Dsubversion=gbm \
-            -Dplatform=gbm \
-            -Darch=arm64 \
-            -Dopencl-icd=false \
-            -Dvendor-package=false \
-            -Dwrappers=enabled \
-            -Dhooks=true
+[host_machine]
+system = "linux"
+cpu_family = "aarch64"
+cpu = "aarch64"
+endian = "little"
+EOF
 
-          echo "=== Baue Hook und Wrapper ==="
-          ninja -C builddir
+              echo "=== Konfiguriere Meson für Bifrost G31 (GBM) ==="
+              meson setup builddir \
+                --cross-file /tmp/aarch64-cross.ini \
+                --prefix=/usr/local \
+                --libdir=lib/aarch64-linux-gnu \
+                -Dgpu=bifrost-g31 \
+                -Dversion=g13p0 \
+                -Dsubversion=gbm \
+                -Dplatform=gbm \
+                -Darch=arm64 \
+                -Dopencl-icd=false \
+                -Dvendor-package=false \
+                -Dwrappers=enabled \
+                -Dhooks=true
 
-          echo "=== Kopiere die kompilierten Bibliotheken nach $MALI_HOOK_DIR ==="
-          # Finde die gebauten .so-Dateien
-          find builddir -name 'libmali-hook.so*' -o -name 'libEGL.so*' -o -name 'libGLESv2.so*' -o -name 'libgbm.so*' | while read -r f; do
-            cp -L "$f" "$MALI_HOOK_DIR/$(basename "$f")"
-            echo "  -> $(basename "$f")"
-          done
+              echo "=== Baue Hook und Wrapper ==="
+              ninja -C builddir
 
-          echo "=== Kopiere den vorkompilierten Mali-Treiber ==="
-          # Der Treiber ist im libmali-rockchip-Repo unter lib/ zu finden.
-          # Wir suchen die passende Datei für Bifrost G31, GBM.
-          DRIVER=$(find /tmp/libmali-rockchip/lib -name 'libmali-bifrost-g31-g13p0-gbm.so' | head -1)
-          if [ -z "$DRIVER" ]; then
-            # Fallback: Suche nach einer allgemeineren G31-GBM-Datei
-            DRIVER=$(find /tmp/libmali-rockchip/lib -name 'libmali-bifrost-g31-*gbm*.so' | head -1)
-          fi
-          if [ -z "$DRIVER" ]; then
-            echo "FEHLER: Mali-Treiber für Bifrost G31 GBM nicht gefunden"
-            exit 1
-          fi
-          cp -L "$DRIVER" "$MALI_HOOK_DIR/libmali-bifrost-g31-g13p0-gbm.so"
-          cd "$MALI_HOOK_DIR"
-          ln -sf "libmali-bifrost-g31-g13p0-gbm.so" libmali.so
-          ln -sf "libmali-bifrost-g31-g13p0-gbm.so" libmali.so.1
+              echo "=== Kopiere die kompilierten Bibliotheken nach $MALI_HOOK_DIR ==="
+              find builddir -name "libmali-hook.so*" -o -name "libEGL.so*" -o -name "libGLESv2.so*" -o -name "libgbm.so*" | while read -r f; do
+                cp -L "$f" "$MALI_HOOK_DIR/$(basename "$f")"
+                echo "  -> $(basename "$f")"
+              done
 
-          echo "=== Setze SONAMEs mit patchelf ==="
-          if command -v patchelf >/dev/null 2>&1; then
-            patchelf --set-soname libmali.so.1 "$MALI_HOOK_DIR/libmali-bifrost-g31-g13p0-gbm.so" 2>/dev/null || true
-            patchelf --set-soname libmali-hook.so.1 "$MALI_HOOK_DIR/libmali-hook.so.1" 2>/dev/null || true
-            echo "OK: SONAMEs gesetzt"
-          fi
+              echo "=== Kopiere den vorkompilierten Mali-Treiber ==="
+              DRIVER=$(find /tmp/libmali-rockchip/lib -name "libmali-bifrost-g31-g13p0-gbm.so" | head -1)
+              if [ -z "$DRIVER" ]; then
+                DRIVER=$(find /tmp/libmali-rockchip/lib -name "libmali-bifrost-g31-*gbm*.so" | head -1)
+              fi
+              if [ -z "$DRIVER" ]; then
+                echo "FEHLER: Mali-Treiber für Bifrost G31 GBM nicht gefunden"
+                exit 1
+              fi
+              cp -L "$DRIVER" "$MALI_HOOK_DIR/libmali-bifrost-g31-g13p0-gbm.so"
+              cd "$MALI_HOOK_DIR"
+              ln -sf "libmali-bifrost-g31-g13p0-gbm.so" libmali.so
+              ln -sf "libmali-bifrost-g31-g13p0-gbm.so" libmali.so.1
 
-          echo "=== Inhalt von mali-hook/ ==="
-          ls -la "$MALI_HOOK_DIR"
+              echo "=== Setze SONAMEs mit patchelf ==="
+              if command -v patchelf >/dev/null 2>&1; then
+                patchelf --set-soname libmali.so.1 "$MALI_HOOK_DIR/libmali-bifrost-g31-g13p0-gbm.so" 2>/dev/null || true
+                patchelf --set-soname libmali-hook.so.1 "$MALI_HOOK_DIR/libmali-hook.so.1" 2>/dev/null || true
+                echo "OK: SONAMEs gesetzt"
+              fi
 
-          echo "=== Kopiere Startscript ==="
-          if [ -f "$GITHUB_WORKSPACE/Nazi Zombies.sh" ]; then
-            cp "$GITHUB_WORKSPACE/Nazi Zombies.sh" "$RELEASE_DIR/Nazi Zombies.sh"
-            chmod +x "$RELEASE_DIR/Nazi Zombies.sh"
-            echo "OK: Nazi Zombies.sh kopiert."
-          else
-            echo "WARNUNG: Nazi Zombies.sh nicht im Repo-Root gefunden."
-          fi
+              echo "=== Inhalt von mali-hook/ ==="
+              ls -la "$MALI_HOOK_DIR"
+
+              echo "=== Kopiere Startscript ==="
+              if [ -f "/workspace/Nazi Zombies.sh" ]; then
+                cp "/workspace/Nazi Zombies.sh" "$RELEASE_DIR/Nazi Zombies.sh"
+                chmod +x "$RELEASE_DIR/Nazi Zombies.sh"
+                echo "OK: Nazi Zombies.sh kopiert."
+              else
+                echo "WARNUNG: Nazi Zombies.sh nicht im Repo-Root gefunden."
+              fi
+            '
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
