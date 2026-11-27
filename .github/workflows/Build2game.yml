@@ -411,7 +411,7 @@ jobs:
                 --libdir=lib/aarch64-linux-gnu \
                 -Dgpu=bifrost-g31 \
                 -Dversion=g13p0 \
-                -Dsubversion=gbm \
+                -Dsubversion=none \
                 -Dplatform=gbm \
                 -Darch=arm64 \
                 -Dopencl-icd=false \
