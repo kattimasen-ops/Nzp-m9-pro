@@ -21,10 +21,27 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Write patch scripts to host
+      - name: Write patch scripts and cross-file to host
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/nzp-build"
+
+          cat > "$RUNNER_TEMP/nzp-build/aarch64-cross.ini" << 'CROSSEOF'
+          [binaries]
+          c = 'aarch64-linux-gnu-gcc'
+          cpp = 'aarch64-linux-gnu-g++'
+          ar = 'aarch64-linux-gnu-ar'
+          strip = 'aarch64-linux-gnu-strip'
+          pkgconfig = 'aarch64-linux-gnu-pkg-config'
+
+          [host_machine]
+          system = 'linux'
+          cpu_family = 'aarch64'
+          cpu = 'aarch64'
+          endian = 'little'
+          CROSSEOF
+          # strip leading spaces from the cross-file (heredoc indentation)
+          sed -i 's/^          //' "$RUNNER_TEMP/nzp-build/aarch64-cross.ini"
 
           cat > "$RUNNER_TEMP/nzp-build/patch_prcmds.py" << 'PYEOF'
           import sys, pathlib
@@ -364,6 +381,7 @@ jobs:
         run: |
           docker run --rm \
             -v "$GITHUB_WORKSPACE:/workspace" \
+            -v "$RUNNER_TEMP/nzp-build/aarch64-cross.ini:/tmp/aarch64-cross.ini:ro" \
             -w /workspace \
             ubuntu:20.04 bash -c '
               set -euo pipefail
@@ -372,7 +390,7 @@ jobs:
               apt-get update -qq
               apt-get install -y -qq \
                 gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-                build-essential make git pkg-config wget ca-certificates python3 patch file patchelf meson ninja-build
+                build-essential git pkg-config wget ca-certificates python3 patch file patchelf meson ninja-build
 
               RELEASE_DIR="/workspace/engine/release"
               MALI_HOOK_DIR="$RELEASE_DIR/mali-hook"
@@ -383,21 +401,8 @@ jobs:
               git clone --depth 1 https://github.com/tsukumijima/libmali-rockchip.git /tmp/libmali-rockchip
               cd /tmp/libmali-rockchip
 
-              echo "=== Erstelle Cross-File für Meson ==="
-              cat > /tmp/aarch64-cross.ini << "EOF"
-[binaries]
-c = "aarch64-linux-gnu-gcc"
-cpp = "aarch64-linux-gnu-g++"
-ar = "aarch64-linux-gnu-ar"
-strip = "aarch64-linux-gnu-strip"
-pkgconfig = "aarch64-linux-gnu-pkg-config"
-
-[host_machine]
-system = "linux"
-cpu_family = "aarch64"
-cpu = "aarch64"
-endian = "little"
-EOF
+              echo "=== Cross-File-Inhalt ==="
+              cat /tmp/aarch64-cross.ini
 
               echo "=== Konfiguriere Meson für Bifrost G31 (GBM) ==="
               meson setup builddir \
@@ -417,7 +422,7 @@ EOF
               echo "=== Baue Hook und Wrapper ==="
               ninja -C builddir
 
-              echo "=== Kopiere die kompilierten Bibliotheken nach $MALI_HOOK_DIR ==="
+              echo "=== Kopiere die kompilierten Bibliotheken ==="
               find builddir -name "libmali-hook.so*" -o -name "libEGL.so*" -o -name "libGLESv2.so*" -o -name "libgbm.so*" | while read -r f; do
                 cp -L "$f" "$MALI_HOOK_DIR/$(basename "$f")"
                 echo "  -> $(basename "$f")"
@@ -429,7 +434,7 @@ EOF
                 DRIVER=$(find /tmp/libmali-rockchip/lib -name "libmali-bifrost-g31-*gbm*.so" | head -1)
               fi
               if [ -z "$DRIVER" ]; then
-                echo "FEHLER: Mali-Treiber für Bifrost G31 GBM nicht gefunden"
+                echo "FEHLER: Mali-Treiber nicht gefunden"
                 exit 1
               fi
               cp -L "$DRIVER" "$MALI_HOOK_DIR/libmali-bifrost-g31-g13p0-gbm.so"
