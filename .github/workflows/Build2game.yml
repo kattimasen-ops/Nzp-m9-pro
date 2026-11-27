@@ -40,7 +40,6 @@ jobs:
           cpu = 'aarch64'
           endian = 'little'
           CROSSEOF
-          # strip leading spaces from the cross-file (heredoc indentation)
           sed -i 's/^          //' "$RUNNER_TEMP/nzp-build/aarch64-cross.ini"
 
           cat > "$RUNNER_TEMP/nzp-build/patch_prcmds.py" << 'PYEOF'
@@ -400,6 +399,9 @@ jobs:
               rm -rf /tmp/libmali-rockchip
               git clone --depth 1 https://github.com/tsukumijima/libmali-rockchip.git /tmp/libmali-rockchip
               cd /tmp/libmali-rockchip
+
+              echo "=== Erstelle Symlink für grabber.sh (arm64 -> aarch64) ==="
+              ln -sf lib/arm64 lib/aarch64
 
               echo "=== Cross-File-Inhalt ==="
               cat /tmp/aarch64-cross.ini
