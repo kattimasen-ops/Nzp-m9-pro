@@ -406,13 +406,13 @@ jobs:
               echo "=== Cross-File-Inhalt ==="
               cat /tmp/aarch64-cross.ini
 
-              echo "=== Konfiguriere Meson für Bifrost G31 (GBM) ==="
+              echo "=== Konfiguriere Meson für Bifrost G31 (GBM, g24p0) ==="
               meson setup builddir \
                 --cross-file /tmp/aarch64-cross.ini \
                 --prefix=/usr/local \
                 --libdir=lib/aarch64-linux-gnu \
                 -Dgpu=bifrost-g31 \
-                -Dversion=g13p0 \
+                -Dversion=g24p0 \
                 -Dsubversion=none \
                 -Dplatform=gbm \
                 -Darch=arm64 \
@@ -430,23 +430,20 @@ jobs:
                 echo "  -> $(basename "$f")"
               done
 
-              echo "=== Kopiere den vorkompilierten Mali-Treiber ==="
-              DRIVER=$(find /tmp/libmali-rockchip/lib -name "libmali-bifrost-g31-g13p0-gbm.so" | head -1)
+              echo "=== Kopiere den vorkompilierten Mali-Treiber (g24p0) ==="
+              DRIVER=$(find /tmp/libmali-rockchip/lib -name "libmali-bifrost-g31-g24p0-gbm.so" | head -1)
               if [ -z "$DRIVER" ]; then
-                DRIVER=$(find /tmp/libmali-rockchip/lib -name "libmali-bifrost-g31-*gbm*.so" | head -1)
-              fi
-              if [ -z "$DRIVER" ]; then
-                echo "FEHLER: Mali-Treiber nicht gefunden"
+                echo "FEHLER: Mali-Treiber libmali-bifrost-g31-g24p0-gbm.so nicht gefunden"
                 exit 1
               fi
-              cp -L "$DRIVER" "$MALI_HOOK_DIR/libmali-bifrost-g31-g13p0-gbm.so"
+              cp -L "$DRIVER" "$MALI_HOOK_DIR/libmali-bifrost-g31-g24p0-gbm.so"
               cd "$MALI_HOOK_DIR"
-              ln -sf "libmali-bifrost-g31-g13p0-gbm.so" libmali.so
-              ln -sf "libmali-bifrost-g31-g13p0-gbm.so" libmali.so.1
+              ln -sf "libmali-bifrost-g31-g24p0-gbm.so" libmali.so
+              ln -sf "libmali-bifrost-g31-g24p0-gbm.so" libmali.so.1
 
               echo "=== Setze SONAMEs mit patchelf ==="
               if command -v patchelf >/dev/null 2>&1; then
-                patchelf --set-soname libmali.so.1 "$MALI_HOOK_DIR/libmali-bifrost-g31-g13p0-gbm.so" 2>/dev/null || true
+                patchelf --set-soname libmali.so.1 "$MALI_HOOK_DIR/libmali-bifrost-g31-g24p0-gbm.so" 2>/dev/null || true
                 patchelf --set-soname libmali-hook.so.1 "$MALI_HOOK_DIR/libmali-hook.so.1" 2>/dev/null || true
                 echo "OK: SONAMEs gesetzt"
               fi
