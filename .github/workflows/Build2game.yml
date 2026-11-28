@@ -386,12 +386,34 @@ jobs:
               set -euo pipefail
               export DEBIAN_FRONTEND=noninteractive
 
+              # ============================================================
+              # ARM64-Architektur aktivieren und Ports-Quellen konfigurieren
+              # ============================================================
+              echo "=== Aktiviere arm64-Architektur ==="
+              dpkg --add-architecture arm64
+
+              echo "=== Markiere amd64-Quellen explizit ==="
+              sed -i "s|^deb |deb [arch=amd64] |" /etc/apt/sources.list
+
+              echo "=== Füge arm64-Ports-Quellen hinzu ==="
+              cat > /etc/apt/sources.list.d/arm64-ports.list << "EOF"
+deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal main restricted universe multiverse
+deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-updates main restricted universe multiverse
+deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports focal-security main restricted universe multiverse
+EOF
+
               apt-get update -qq
+
+              # ============================================================
+              # Build-Werkzeuge und arm64-Entwicklungspakete installieren
+              # ============================================================
               apt-get install -y -qq \
                 gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-                build-essential git pkg-config wget ca-certificates python3 patch file patchelf meson ninja-build \
+                build-essential git pkg-config wget ca-certificates \
+                python3 patch file patchelf meson ninja-build \
                 libdrm-dev:arm64 libgbm-dev:arm64
 
+              # pkg-config auf arm64-Pfade zeigen lassen
               export PKG_CONFIG_LIBDIR=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig
               export PKG_CONFIG_SYSROOT_DIR=/
 
